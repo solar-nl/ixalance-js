@@ -6,16 +6,35 @@ import { readIxa, unpackBlock, parseScript, classify } from './lib/ixa.js';
 import { Machine, partmemFor } from './lib/machine.js';
 import { CPU, Unimplemented, Fault } from './lib/cpu.js';
 
-// Instructions per slice. The worker yields between slices so that pause and stop
-// messages are seen promptly; ~4M is around a tenth of a second.
-const SLICE = 4_000_000;
+// How long a slice should take, not how many instructions it should be. A fixed count
+// was ~90 ms once the interpreter got fast, which is both a visible pause before a stop
+// message is seen and far coarser than the frame it has to land a pace on. The count is
+// re-derived from the measured rate after every slice and clamped in case a slice lands
+// inside something pathological.
+const SLICE_MS = 4;
+const SLICE_MIN = 64_000, SLICE_MAX = 64_000_000;
+
+// Pacing tolerances, virtual clock only. Sleep only when far enough ahead that a sleep is
+// worth its own overhead, and forget a deficit larger than this: the intro spends billions
+// of instructions presenting nothing, and that debt must not cash out as a burst of
+// unthrottled frames the moment it starts drawing.
+const PACE_SLACK_MS = 2, PACE_MAX_LAG_MS = 250;
 
 let machine, cpu;
 let running = false, stopped = false;
+let slice = 1_000_000;
 
 const post = (type, data = {}) => self.postMessage({ type, ...data });
 const log = (text, cls) => post('log', { text, cls });
-const yieldToLoop = () => new Promise((r) => setTimeout(r, 0));
+
+// setTimeout(0) is clamped to 4 ms once it nests five deep, which at a 4 ms slice would
+// halve throughput outright. A MessageChannel round trip is a real task — so messages
+// queued against the worker are still delivered before it resumes — but is not clamped.
+const hop = new MessageChannel();
+let onHop = null;
+hop.port1.onmessage = () => { const r = onHop; onHop = null; if (r) r(); };
+const yieldToLoop = () => new Promise((r) => { onHop = r; hop.port2.postMessage(0); });
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function boot({ url, clock, fps }) {
   log(`fetching ${url}`);
@@ -59,6 +78,9 @@ async function boot({ url, clock, fps }) {
   log(`fixups: ${loaded.relocs.address} address + ${loaded.relocs.segment} segment`);
 
   cpu = new CPU(machine);
+  // Nothing here inspects individual host calls, only how many there were, and a demo
+  // that polls farmalloc() would grow the log by tens of millions of records a minute.
+  cpu.retainTrampolineHits = false;
   cpu.reset(loaded);
   log('running — the intro generates all its graphics first, so expect a decrunch bar '
       + 'for a while before anything else happens', 'warn');
@@ -66,11 +88,23 @@ async function boot({ url, clock, fps }) {
 
 async function loop() {
   let lastReport = 0, lastCount = 0, lastMs = Date.now();
-  while (!stopped && !cpu.halted) {
-    if (!running) { await yieldToLoop(); lastMs = Date.now(); lastCount = cpu.count; continue; }
+  // Where the demo's timeline and the wall clock were last agreed to line up. Only the
+  // virtual clock needs this: under 'wall' the demo reads real time itself and paces on
+  // its own, so throttling it here would only make it miss its own deadlines.
+  const paced = machine.clock === 'virtual';
+  let paceReal = performance.now(), paceVirtual = machine.virtualMs;
 
+  while (!stopped && !cpu.halted) {
+    if (!running) {
+      await yieldToLoop();
+      lastMs = Date.now(); lastCount = cpu.count;
+      paceReal = performance.now(); paceVirtual = machine.virtualMs;   // paused time is not owed
+      continue;
+    }
+
+    const sliceStart = performance.now();
     try {
-      cpu.run(SLICE);
+      cpu.run(slice);
     } catch (e) {
       if (e instanceof Unimplemented || e instanceof Fault) {
         log(`${e.name}: ${e.message}`, 'err');
@@ -84,14 +118,33 @@ async function loop() {
       return;
     }
 
+    // Re-aim the next slice at SLICE_MS. Fixed instruction counts drift by an order of
+    // magnitude between the intro's setup phase and its inner loops.
+    const took = performance.now() - sliceStart;
+    if (took > 0.1) {
+      const want = slice * (SLICE_MS / took);
+      slice = Math.max(SLICE_MIN, Math.min(SLICE_MAX, Math.round(slice * 0.75 + want * 0.25)));
+    }
+
     const now = Date.now();
     if (now - lastReport > 400) {
       const rate = (cpu.count - lastCount) / ((now - lastMs) / 1000);
       post('stat', {
         count: cpu.count, frames: machine.frames,
-        calls: cpu.trampolineHits.length, rate,
+        calls: cpu.trampolineCount, rate,
       });
       lastReport = now; lastCount = cpu.count; lastMs = now;
+    }
+
+    // The virtual clock advances a fixed step per presented frame and nothing else, so the
+    // demo runs at whatever rate the interpreter manages — too slow before, and too fast
+    // once it is quick enough. Hold it to real time by sleeping off whatever it is ahead.
+    // Sleeping cannot perturb the instruction stream, since no clock the demo can read
+    // moves while the worker is idle.
+    if (paced) {
+      const ahead = (machine.virtualMs - paceVirtual) - (performance.now() - paceReal);
+      if (ahead > PACE_SLACK_MS) await sleep(ahead);
+      else if (ahead < -PACE_MAX_LAG_MS) { paceReal = performance.now(); paceVirtual = machine.virtualMs; }
     }
     await yieldToLoop();
   }
