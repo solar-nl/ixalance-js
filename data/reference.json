@@ -1,0 +1,105 @@
+{
+  "jizz": {
+    "demoname": "Jizz",
+    "ixa": "5c55d364740911715e6ee50fafd1f4a2a88479ed853364b857b0711cb4a0685e",
+    "blocks": {
+      "1": {
+        "kind": "exe",
+        "size": 1065381,
+        "sha256": "a233b3dbee0afdd638046f1d61d34783b6946350e8d00bf5709510649e2879ef"
+      }
+    }
+  },
+  "stash": {
+    "demoname": "Stash",
+    "ixa": "87b326631d4ef9f4b4ba2c93c46dd73854666b6213d1c5074cb23f9f92bd9e21",
+    "blocks": {
+      "1": {
+        "kind": "exe",
+        "size": 2291462,
+        "sha256": "33fe4d6958662212d6b1d80bc9358ed3f874a795264bbe2840d528e33c6cd774"
+      }
+    }
+  },
+  "astral": {
+    "demoname": "Astral Blur",
+    "ixa": "4f5326b36ba790bf439921e3d0a48c02e425d48bba617a541ef5be58be49b9fa",
+    "blocks": {
+      "1": {
+        "kind": "exe",
+        "size": 66614,
+        "sha256": "ef4e0a763a9ea965378b722e51849e054592cb9b5059084783f23a98ffea1a33"
+      },
+      "2": {
+        "kind": "exe",
+        "size": 278322,
+        "sha256": "0db67e22e21d7dad15235be7e5798fed4bc75cf6481b43ab08be1911092090c6"
+      },
+      "3": {
+        "kind": "exe",
+        "size": 1520765,
+        "sha256": "0fce62cdee5ae247caf301b5f0326cb07dad2ed03168cafd134dbbae57392b33"
+      },
+      "4": {
+        "kind": "exe",
+        "size": 428315,
+        "sha256": "dba9bad8fcd8fbf201809095a23fb887f93ce64c6650a86f0336d57af1727e47"
+      },
+      "5": {
+        "kind": "exe",
+        "size": 422855,
+        "sha256": "363299a720d1e2ee02eb621fd5166f42f5171e4818baa815d1024285ffb384a5"
+      },
+      "6": {
+        "kind": "music",
+        "size": 968517,
+        "sha256": "44aba3dbef7feaed9c1cc5ea9d7fec6ee922f99a1ce7154f622931780b54e06d"
+      },
+      "7": {
+        "kind": "picture",
+        "size": 960032,
+        "sha256": "6627be966590d090443cf0d55b2efd78a32fad116f4e110c0db702e6222df992"
+      },
+      "8": {
+        "kind": "exe",
+        "size": 815559,
+        "sha256": "df955026686551408b5006b52dcf01f69442ca382db155e0b9b39a0ed4fdb264"
+      },
+      "9": {
+        "kind": "exe",
+        "size": 385346,
+        "sha256": "764914d0e484a4a05c798aa2360af2213fdbc21873d05acfc9eeed9599c76d34"
+      },
+      "11": {
+        "kind": "picture",
+        "size": 960032,
+        "sha256": "a2d4a941fcb493aa49de8837985cb4868300a9c8545998e69d164a802ddab8f0"
+      },
+      "12": {
+        "kind": "exe",
+        "size": 149897,
+        "sha256": "c4a0a2dd89993ae04f239bd1bdef6b1a69a0ecf5db82869b1d3cd7c4a2423db8"
+      },
+      "13": {
+        "kind": "exe",
+        "size": 578936,
+        "sha256": "9d49156cdae22cb661941a9a824bb2764607892fd1c3fbdd9d99c70f25eebc74"
+      },
+      "14": {
+        "kind": "exe",
+        "size": 877313,
+        "sha256": "46a2e0b68bbb2f94e90581fef386c8c5446ad49773eb71269ec718b48216bfb8"
+      },
+      "16": {
+        "kind": "picture",
+        "size": 614432,
+        "sha256": "9876868814d5710495e86cf6ba92a2e67169fc780b933856e3e856c42c21a39a"
+      },
+      "17": {
+        "kind": "exe",
+        "size": 179389,
+        "sha256": "1d34f8ece816baa1786961e71c43a7b8a038a9e7e37fce3e9557536f2ac87acc"
+      }
+    }
+  }
+}
