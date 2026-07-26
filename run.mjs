@@ -12,7 +12,12 @@ import { deflateSync } from 'node:zlib';
 import { readIxa, unpackBlock, parseScript, classify } from './lib/ixa.js';
 import { Machine, partmemFor } from './lib/machine.js';
 import { CPU, Unimplemented, Fault } from './lib/cpu.js';
+import { JitCPU } from './lib/jit.js';
 import { XmPlayer } from './lib/xm.js';
+
+// The interpreter is the engine unless something asks for the other one by name, so an
+// unset or misspelled IXA_ENGINE runs exactly what it ran before.
+const Engine = (globalThis.process?.env?.IXA_ENGINE === 'jit') ? JitCPU : CPU;
 
 const HERE = new URL('.', import.meta.url).pathname;
 const sha = (b) => createHash('sha256').update(b).digest('hex');
@@ -179,7 +184,7 @@ function run(ixaPath, blockArg, budget, frameDir) {
     + `= ${loaded.relocs.address + loaded.relocs.segment} in ${loaded.d32.fixupsize} bytes\n`
     + `  stack esp=0x${(loaded.regs.esp >>> 0).toString(16)}, gfxmodeinfo at 0x${machine.gfx.toString(16)}\n`);
 
-  const cpu = new CPU(machine);
+  const cpu = new Engine(machine);
   cpu.reset(loaded);
 
   let err = null;
@@ -251,7 +256,7 @@ function dumpXm(ixaPath, outPath) {
     },
   });
   const loaded = machine.loadExe(unpackBlock(bytes, entries[ops.find((o) => o.name === 'exe').args[0]]));
-  const cpu = new CPU(machine);
+  const cpu = new Engine(machine);
   cpu.reset(loaded);
   try {
     cpu.run(2e10);

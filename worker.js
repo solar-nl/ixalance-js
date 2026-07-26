@@ -5,6 +5,7 @@
 import { readIxa, unpackBlock, parseScript, classify } from './lib/ixa.js';
 import { Machine, partmemFor } from './lib/machine.js';
 import { CPU, Unimplemented, Fault } from './lib/cpu.js';
+import { JitCPU } from './lib/jit.js';
 
 // How long a slice should take, not how many instructions it should be. A fixed count
 // was ~90 ms once the interpreter got fast, which is both a visible pause before a stop
@@ -36,7 +37,7 @@ hop.port1.onmessage = () => { const r = onHop; onHop = null; if (r) r(); };
 const yieldToLoop = () => new Promise((r) => { onHop = r; hop.port2.postMessage(0); });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-async function boot({ url, clock, fps }) {
+async function boot({ url, clock, fps, engine }) {
   log(`fetching ${url}`);
   const res = await fetch(url);
   if (!res.ok) throw new Error(`${res.status} ${res.statusText} fetching ${url}`);
@@ -77,7 +78,10 @@ async function boot({ url, clock, fps }) {
       + `entry 0x${loaded.entry.toString(16)}`);
   log(`fixups: ${loaded.relocs.address} address + ${loaded.relocs.segment} segment`);
 
-  cpu = new CPU(machine);
+  // Anything other than the exact string 'jit' — including an absent message field and an
+  // absent environment — leaves the page running the interpreter it ran before.
+  const wantJit = engine === 'jit' || globalThis.process?.env?.IXA_ENGINE === 'jit';
+  cpu = wantJit ? new JitCPU(machine) : new CPU(machine);
   // Nothing here inspects individual host calls, only how many there were, and a demo
   // that polls farmalloc() would grow the log by tens of millions of records a minute.
   cpu.retainTrampolineHits = false;

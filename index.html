@@ -48,6 +48,8 @@
   <button id="start">Load and run</button>
   <button id="pause" disabled>Pause</button>
   <label><input type="checkbox" id="sound" checked> sound</label>
+  <!-- Off unless asked for: the JIT is an experiment and the interpreter is the reference. -->
+  <label><input type="checkbox" id="jit"> JIT</label>
 </div>
 
 <div id="stat">idle</div>
@@ -78,6 +80,9 @@ const startBtn = document.getElementById('start');
 const pauseBtn = document.getElementById('pause');
 const prodSel = document.getElementById('prod');
 const soundBox = document.getElementById('sound');
+const jitBox = document.getElementById('jit');
+// ?engine=jit preselects it, so a comparison run is a URL rather than a click.
+if (new URLSearchParams(location.search).get('engine') === 'jit') jitBox.checked = true;
 
 let worker = null;
 let audio = null;
@@ -183,6 +188,8 @@ startBtn.onclick = () => {
     // keeps a slow interpreter from skipping.
     clock: wantSound ? 'wall' : 'virtual',
     fps: 50,
+    // The worker only accepts the exact string 'jit'; anything else runs the interpreter.
+    engine: jitBox.checked ? 'jit' : 'cpu',
   });
 };
 
