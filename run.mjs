@@ -3,6 +3,8 @@
 //
 //   node run.mjs verify                        check codecs against data/reference.json
 //   node run.mjs run <file.ixa> [block] [budget] [framedir]
+//       with no block the script drives: every part, in the order the demo asks for.
+//       Name a block to load and run that one alone, for probing a part in isolation.
 //   node run.mjs dumpxm <file.ixa> <out.xm>    capture the module a part generates
 //   node run.mjs renderxm <file.xm> <out.wav> [seconds]
 
@@ -11,6 +13,7 @@ import { createHash } from 'node:crypto';
 import { deflateSync } from 'node:zlib';
 import { readIxa, unpackBlock, parseScript, classify } from './lib/ixa.js';
 import { Machine, partmemFor } from './lib/machine.js';
+import { Sequencer } from './lib/sequencer.js';
 import { CPU, Unimplemented, Fault } from './lib/cpu.js';
 import { JitCPU } from './lib/jit.js';
 import { XmPlayer } from './lib/xm.js';
@@ -145,15 +148,35 @@ function png(rgb565, width, height) {
   ]);
 }
 
-function run(ixaPath, blockArg, budget, frameDir) {
+/** Report a Fault/Unimplemented the same way whichever path raised it. */
+function reportFault(err) {
+  process.stdout.write(`\n  ${err.name}: ${err.message}\n`);
+  process.stdout.write(`    at eip 0x${err.eip.toString(16)} after ${err.count} instructions\n`);
+  process.stdout.write(`    bytes: ${err.bytes}\n`);
+  const r = err.regs;
+  process.stdout.write(`    eax=${r.eax} ecx=${r.ecx} edx=${r.edx} ebx=${r.ebx}\n`);
+  process.stdout.write(`    esp=${r.esp} ebp=${r.ebp} esi=${r.esi} edi=${r.edi}\n`);
+  return 1;
+}
+
+async function run(ixaPath, blockArg, budget, frameDir) {
   const bytes = new Uint8Array(readFileSync(ixaPath));
   const { demoname, entries } = readIxa(bytes);
   const script = bytes.subarray(entries[0].pos, entries[0].pos + entries[0].size);
   const ops = parseScript(script);
   const kinds = classify(ops, entries.length);
 
-  const block = blockArg ? Number(blockArg) : ops.find((o) => o.name === 'exe').args[0];
-  process.stdout.write(`${demoname.trim()}: running block ${block} (${kinds[block]})\n`);
+  // Naming a block means "probe this part": load it and run it, script and part stack
+  // ignored, which is how a single part gets measured in isolation. Without one the script
+  // drives, and for a 64K intro's `exe(1) pop` that reduces to the very same thing — one
+  // block, one CPU — while for Astral Blur it is eleven parts in LIFO order with picture
+  // blits and a module in between. An empty argument is "not named": `run f.ixa '' 4e8 dir`
+  // is how a budget and a frame directory get past the block slot.
+  const probe = blockArg !== undefined && blockArg !== '';
+  const block = probe ? Number(blockArg) : null;
+  process.stdout.write(probe
+    ? `${demoname.trim()}: running block ${block} (${kinds[block]})\n`
+    : `${demoname.trim()}: running the script, ${ops.length} opcodes over ${entries.length - 1} blocks\n`);
 
   let saved = 0, seen = 0;
   const every = Number(process.env.IXA_FRAME_EVERY ?? 1);
@@ -175,6 +198,38 @@ function run(ixaPath, blockArg, budget, frameDir) {
     },
   });
 
+  if (!probe) {
+    const seq = new Sequencer({
+      bytes, machine, budget,
+      // A fresh interpreter per part, none of them keeping a trampoline log: Astral banks
+      // ~140k {addr,count,eip} records per million instructions and a run that gets as far
+      // as the third part is billions long, so retention is an out-of-memory kill, not a
+      // diagnostic. cpu.trampolineCount still counts them.
+      makeCpu: () => { const c = new Engine(machine); c.retainTrampolineHits = false; return c; },
+      onOp: (o) => process.stdout.write(`  script[${o.index}] ${o.name}(${o.args.join(',')})\n`),
+      onPart: (p) => process.stdout.write(`    ${p.phase} ${p.kind} ${p.block}\n`),
+    });
+
+    let err = null;
+    try {
+      await seq.run();
+    } catch (e) {
+      if (e instanceof Unimplemented || e instanceof Fault) err = e;
+      else throw e;
+    }
+
+    // No completion assertion: Astral is 448 seconds of music and block 3 alone has eaten
+    // 4.57 billion instructions in a probe, so "ran out of budget mid-script" is the normal
+    // outcome and not a failure. What is worth printing is how far it got.
+    process.stdout.write(
+      `\n  executed ${seq.executed} instructions, ${machine.frames} frames presented, `
+      + `${seq.trampolines + (seq.cpu?.trampolineCount ?? 0)} host calls, `
+      + `script byte ${seq.pos}/${seq.script.length}${seq.done ? ' (complete)' : ''}`
+      + `${seq.error ? ` (error: ${seq.error})` : ''}\n`);
+    if (frameDir) process.stdout.write(`  wrote ${saved} non-blank frame(s) to ${frameDir}\n`);
+    return err ? reportFault(err) : 0;
+  }
+
   const image = unpackBlock(bytes, entries[block]);
   const loaded = machine.loadExe(image);
   process.stdout.write(
@@ -185,6 +240,10 @@ function run(ixaPath, blockArg, budget, frameDir) {
     + `  stack esp=0x${(loaded.regs.esp >>> 0).toString(16)}, gfxmodeinfo at 0x${machine.gfx.toString(16)}\n`);
 
   const cpu = new Engine(machine);
+  // The hit list is per-instruction detail worth keeping for a short probe and fatal for a
+  // long one — ~140k records per million instructions on Astral. The default budget is 1e7,
+  // so ordinary probes are unaffected and only deliberately long ones give up the list.
+  if (budget > 5e7) cpu.retainTrampolineHits = false;
   cpu.reset(loaded);
 
   let err = null;
@@ -203,21 +262,16 @@ function run(ixaPath, blockArg, budget, frameDir) {
     for (const h of cpu.trampolineHits.slice(0, 8)) {
       process.stdout.write(`    ${names[h.addr - 0xf0000000]} at instruction ${h.count}, from 0x${h.eip.toString(16)}\n`);
     }
+  } else if (cpu.trampolineCount) {
+    // An empty list with a non-zero count is retention turned off above, not silence.
+    process.stdout.write(
+      `  reached ${cpu.trampolineCount} host callback(s) (list not retained at this budget)\n`);
   } else {
     process.stdout.write('  no host callback reached yet\n');
   }
 
   if (cpu.halted) process.stdout.write(`  halted: ${cpu.haltReason}\n`);
-  if (err) {
-    process.stdout.write(`\n  ${err.name}: ${err.message}\n`);
-    process.stdout.write(`    at eip 0x${err.eip.toString(16)} after ${err.count} instructions\n`);
-    process.stdout.write(`    bytes: ${err.bytes}\n`);
-    const r = err.regs;
-    process.stdout.write(`    eax=${r.eax} ecx=${r.ecx} edx=${r.edx} ebx=${r.ebx}\n`);
-    process.stdout.write(`    esp=${r.esp} ebp=${r.ebp} esi=${r.esi} edi=${r.edi}\n`);
-    return 1;
-  }
-  return 0;
+  return err ? reportFault(err) : 0;
 }
 
 /**
@@ -273,7 +327,8 @@ const [cmd, ...rest] = process.argv.slice(2);
 if (cmd === 'verify') process.exit(verify());
 else if (cmd === 'dumpxm') process.exit(dumpXm(rest[0], rest[1]));
 else if (cmd === 'renderxm') process.exit(renderXm(rest[0], rest[1], Number(rest[2] ?? 30)));
-else if (cmd === 'run') process.exit(run(rest[0], rest[1], Number(rest[2] ?? 1e7), rest[3]));
+// run() is async because the sequencer's run() is; the other commands stay synchronous.
+else if (cmd === 'run') run(rest[0], rest[1], Number(rest[2] ?? 1e7), rest[3]).then(process.exit);
 else {
   // The usage block at the top of this file is the help text.
   const src = readFileSync(new URL(import.meta.url), 'utf8').split('\n');

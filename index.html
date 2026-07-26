@@ -106,6 +106,10 @@ function draw() {
   if (canvas.width !== width || canvas.height !== height) {
     canvas.width = width;
     canvas.height = height;
+    // The stylesheet's 8/5 is only the pre-first-frame default. A demo changes resolution
+    // per part — Astral Blur's picture blits are 4:3 — and without following it here the
+    // pictures would be stretched to the 320x200 shape of the parts around them.
+    canvas.style.aspectRatio = `${width} / ${height}`;
   }
   ctx.putImageData(new ImageData(pixels, width, height), 0, 0);
 }

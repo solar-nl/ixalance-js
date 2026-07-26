@@ -2,8 +2,9 @@
 // billions of instructions generating its graphics before it draws anything, which on
 // the main thread would simply look like a hung tab.
 
-import { readIxa, unpackBlock, parseScript, classify } from './lib/ixa.js';
+import { readIxa, parseScript } from './lib/ixa.js';
 import { Machine, partmemFor } from './lib/machine.js';
+import { Sequencer } from './lib/sequencer.js';
 import { CPU, Unimplemented, Fault } from './lib/cpu.js';
 import { JitCPU } from './lib/jit.js';
 
@@ -21,7 +22,7 @@ const SLICE_MIN = 64_000, SLICE_MAX = 64_000_000;
 // unthrottled frames the moment it starts drawing.
 const PACE_SLACK_MS = 2, PACE_MAX_LAG_MS = 250;
 
-let machine, cpu;
+let machine, seq;
 let running = false, stopped = false;
 let slice = 1_000_000;
 
@@ -46,15 +47,30 @@ async function boot({ url, clock, fps, engine }) {
   const { demoname, entries } = readIxa(bytes);
   const script = bytes.subarray(entries[0].pos, entries[0].pos + entries[0].size);
   const ops = parseScript(script);
-  const kinds = classify(ops, entries.length);
   log(`${demoname.trim()}: ${entries.length} blocks`);
   log(`script: ${ops.map((o) => o.name + (o.args.length ? `(${o.args})` : '')).join(' ')}`);
+
+  // farmalloc(0) is not an allocation, it is the demo's yield-to-host idiom, and a
+  // music-gated part makes tens of millions of them: Astral's block 1 alone polls it
+  // ~11,000 times a second. One line each would append DOM nodes faster than the page can
+  // retire them, so say it once and let the host-call counter carry the rest. Every other
+  // host message — real allocations, TBL requests, the module handover — still comes out.
+  let yields = 0;
 
   machine = new Machine({
     partmem: partmemFor(demoname),
     clock, fps,
-    onDebug: (m) => log(`  host: ${m}`),
-    // The demo generates its module in memory and hands it over via fardoint 'TBL1'.
+    onDebug: (m) => {
+      if (m.startsWith('farmalloc(0)')) {
+        if (yields++ === 0) log('  host: farmalloc(0) — the part is polling the music '
+                                + 'position; not logging the rest');
+        return;
+      }
+      log(`  host: ${m}`);
+    },
+    // Both music paths end up here: a 64K intro generates its module in memory and hands
+    // it over via fardoint 'TBL1', and the script's `music` opcode copies a stored block
+    // in and starts it the same way. Either way this is the page's only source of audio.
     onMusic: (xm) => {
       const copy = xm.slice();
       self.postMessage({ type: 'music', xm: copy.buffer }, [copy.buffer]);
@@ -70,49 +86,68 @@ async function boot({ url, clock, fps, engine }) {
     },
   });
 
-  const block = ops.find((o) => o.name === 'exe')?.args[0];
-  if (block === undefined) throw new Error('script has no exe block to run');
-  log(`unpacking block ${block} (${kinds[block]})`);
-  const loaded = machine.loadExe(unpackBlock(bytes, entries[block]));
-  log(`image ${loaded.d32.exesize} bytes at 0x${loaded.base.toString(16)}, `
-      + `entry 0x${loaded.entry.toString(16)}`);
-  log(`fixups: ${loaded.relocs.address} address + ${loaded.relocs.segment} segment`);
-
   // Anything other than the exact string 'jit' — including an absent message field and an
   // absent environment — leaves the page running the interpreter it ran before.
   const wantJit = engine === 'jit' || globalThis.process?.env?.IXA_ENGINE === 'jit';
-  cpu = wantJit ? new JitCPU(machine) : new CPU(machine);
-  // Nothing here inspects individual host calls, only how many there were, and a demo
-  // that polls farmalloc() would grow the log by tens of millions of records a minute.
-  cpu.retainTrampolineHits = false;
-  cpu.reset(loaded);
-  log('running — the intro generates all its graphics first, so expect a decrunch bar '
-      + 'for a while before anything else happens', 'warn');
+
+  // The script owns the demo, not one block: `pop` is what runs a part, so Astral Blur's
+  // eleven parts come off the stack in reverse push order with pictures and a module
+  // interleaved. A 64K intro's `exe(1) pop` collapses to what this used to do inline.
+  seq = new Sequencer({
+    bytes, machine,
+    // A fresh interpreter per part, none of them keeping a trampoline log: nothing here
+    // inspects individual host calls, only how many there were, and a part that polls
+    // farmalloc() to yield would grow the list by tens of millions of records a minute.
+    makeCpu: () => {
+      const c = wantJit ? new JitCPU(machine) : new CPU(machine);
+      c.retainTrampolineHits = false;
+      return c;
+    },
+    onOp: (o) => log(`script[${o.index}] ${o.name}(${o.args.join(',')})`),
+    // An exe pop only reports back once the part has far-returned, which for Astral is
+    // minutes of frames later — so this phase is "finished", and the loop announces the
+    // part that a pop *started* from what step() hands back.
+    onPart: (p) => log(p.kind === 'exe' && p.phase === 'pop'
+      ? `  exe ${p.block} returned to host`
+      : `  ${p.phase} ${p.kind} ${p.block}`),
+  });
+  log('running — the parts are loaded first and run in reverse, and a 64K intro generates '
+      + 'all its graphics before it draws, so expect a decrunch bar for a while before '
+      + 'anything else happens', 'warn');
 }
 
 async function loop() {
   let lastReport = 0, lastCount = 0, lastMs = Date.now();
+  let livePart = null;                 // the block a `pop` is currently running, if any
   // Where the demo's timeline and the wall clock were last agreed to line up. Only the
   // virtual clock needs this: under 'wall' the demo reads real time itself and paces on
   // its own, so throttling it here would only make it miss its own deadlines.
   const paced = machine.clock === 'virtual';
   let paceReal = performance.now(), paceVirtual = machine.virtualMs;
 
-  while (!stopped && !cpu.halted) {
+  while (!stopped && !seq.done) {
     if (!running) {
       await yieldToLoop();
-      lastMs = Date.now(); lastCount = cpu.count;
+      lastMs = Date.now(); lastCount = seq.executed;
       paceReal = performance.now(); paceVirtual = machine.virtualMs;   // paused time is not owed
       continue;
     }
 
     const sliceStart = performance.now();
     try {
-      cpu.run(slice);
+      // One bounded unit: a slice of the running part, one WaitMusic iteration, or one
+      // script opcode. It never blocks, so pacing and message delivery stay this loop's.
+      const r = seq.step(slice);
+      // Which part a `pop` dispatched, said at the moment it starts rather than when it
+      // ends: otherwise the log stops at `pop()` for however long the part runs.
+      if (r.state === 'part' && r.block !== livePart) log(`  pop exe ${(livePart = r.block)}`);
+      else if (r.state !== 'part') livePart = null;
     } catch (e) {
       if (e instanceof Unimplemented || e instanceof Fault) {
         log(`${e.name}: ${e.message}`, 'err');
-        log(`  at eip 0x${e.eip.toString(16)} after ${e.count.toLocaleString()} instructions`, 'err');
+        // e.count is the failing part's own count, which restarts at every pop; the
+        // sequencer's total is the number that means anything across a script.
+        log(`  at eip 0x${e.eip.toString(16)} after ${seq.executed.toLocaleString()} instructions`, 'err');
         log(`  bytes: ${e.bytes}`, 'err');
         post('stopped', { reason: e.message });
       } else {
@@ -132,17 +167,21 @@ async function loop() {
 
     const now = Date.now();
     if (now - lastReport > 400) {
-      const rate = (cpu.count - lastCount) / ((now - lastMs) / 1000);
+      // Everything reported here has to be cumulative over the whole script: each part
+      // gets its own CPU and cpu.reset() zeroes its count, so counting the live CPU alone
+      // would step backwards at every part boundary and show a negative rate.
+      const rate = (seq.executed - lastCount) / ((now - lastMs) / 1000);
       post('stat', {
-        count: cpu.count, frames: machine.frames,
-        calls: cpu.trampolineCount, rate,
+        count: seq.executed, frames: machine.frames,
+        calls: seq.trampolines + (seq.cpu?.trampolineCount ?? 0), rate,
       });
-      lastReport = now; lastCount = cpu.count; lastMs = now;
+      lastReport = now; lastCount = seq.executed; lastMs = now;
     }
 
-    // The virtual clock advances a fixed step per presented frame and nothing else, so the
-    // demo runs at whatever rate the interpreter manages — too slow before, and too fast
-    // once it is quick enough. Hold it to real time by sleeping off whatever it is ahead.
+    // The virtual clock advances a fixed step per presented frame, plus whatever the
+    // sequencer adds for a drawless slice or a WaitMusic iteration, so the demo runs at
+    // whatever rate the interpreter manages — too slow before, and too fast once it is
+    // quick enough. Hold it to real time by sleeping off whatever it is ahead.
     // Sleeping cannot perturb the instruction stream, since no clock the demo can read
     // moves while the worker is idle.
     if (paced) {
@@ -152,9 +191,12 @@ async function loop() {
     }
     await yieldToLoop();
   }
-  if (cpu.halted) {
-    log(`halted: ${cpu.haltReason}`);
-    post('stopped', { reason: cpu.haltReason });
+  // Only the script running out ends the demo. A part far-returning to the host halts its
+  // own CPU, which used to be the end of everything and is now just the end of a part —
+  // for Astral that happens eleven times before there is anything to say here.
+  if (seq.done) {
+    log(seq.error ? `stopped: ${seq.error}` : 'script complete');
+    post('stopped', { reason: seq.error ?? 'script complete' });
   }
 }
 
@@ -177,6 +219,10 @@ self.onmessage = async (ev) => {
     running = true;
   } else if (msg.cmd === 'stop') {
     stopped = true;
+    // BreakPart (d32load.c:247-255): the demo is abandoned mid-part, so tell the sequencer
+    // to drop it and free its part memory rather than leaving a live CPU behind. The page
+    // normally terminates the worker straight after, which this does not depend on.
+    if (machine) machine.escaped = true;
   } else if (msg.cmd === 'position') {
     // Where the audio player actually is. Once this arrives the machine stops
     // approximating the position from the module's tempo.
