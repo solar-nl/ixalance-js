@@ -7,6 +7,14 @@
 //       Name a block to load and run that one alone, for probing a part in isolation.
 //   node run.mjs dumpxm <file.ixa> <out.xm>    capture the module a part generates
 //   node run.mjs renderxm <file.xm> <out.wav> [seconds]
+//   node run.mjs bench <file.ixa> [options]     benchmark generated-music intros by XM order
+//       --engine cpu|jit|both  --from ORDER  --to ORDER  --repeat N
+//       --orders 1,4,7-9      run only those orders, each from an exact cached boundary
+//       --csv FILE             write ranked per-order CPU/JIT performance data
+//       --phase decrunch      time fresh startup through the generated-XM handoff
+//       --prepare             only build the cached post-decrunch checkpoint
+//       --prepare-order N     cache exact order starts through N, then exit
+//       --rebuild             replace the post-decrunch checkpoint
 
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { createHash } from 'node:crypto';
@@ -18,9 +26,9 @@ import { CPU, Unimplemented, Fault } from './lib/cpu.js';
 import { JitCPU } from './lib/jit.js';
 import { XmPlayer } from './lib/xm.js';
 
-// The interpreter is the engine unless something asks for the other one by name, so an
-// unset or misspelled IXA_ENGINE runs exactly what it ran before.
-const Engine = (globalThis.process?.env?.IXA_ENGINE === 'jit') ? JitCPU : CPU;
+// The JIT is the production engine; keep the interpreter one environment variable away
+// as the reference path for differential checks.
+const Engine = globalThis.process?.env?.IXA_ENGINE === 'cpu' ? CPU : JitCPU;
 
 const HERE = new URL('.', import.meta.url).pathname;
 const sha = (b) => createHash('sha256').update(b).digest('hex');
@@ -327,6 +335,14 @@ const [cmd, ...rest] = process.argv.slice(2);
 if (cmd === 'verify') process.exit(verify());
 else if (cmd === 'dumpxm') process.exit(dumpXm(rest[0], rest[1]));
 else if (cmd === 'renderxm') process.exit(renderXm(rest[0], rest[1], Number(rest[2] ?? 30)));
+else if (cmd === 'bench') {
+  import('./benchmark.mjs')
+    .then(({ benchmarkIxa }) => process.exit(benchmarkIxa(rest[0], rest.slice(1))))
+    .catch((error) => {
+      process.stderr.write(`bench: ${error?.stack ?? error}\n`);
+      process.exit(1);
+    });
+}
 // run() is async because the sequencer's run() is; the other commands stay synchronous.
 else if (cmd === 'run') run(rest[0], rest[1], Number(rest[2] ?? 1e7), rest[3]).then(process.exit);
 else {

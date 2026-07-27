@@ -13,6 +13,8 @@
     "verify": "node run.mjs verify",
     "jizz": "node run.mjs run data/jizz.ixa",
     "stash": "node run.mjs run data/stash.ixa",
-    "astral": "node run.mjs run data/astral.ixa"
+    "astral": "node run.mjs run data/astral.ixa",
+    "bench:jizz": "node run.mjs bench data/jizz.ixa",
+    "bench:stash": "node run.mjs bench data/stash.ixa"
   }
 }

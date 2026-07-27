@@ -5,7 +5,7 @@ The Black Lotus' **iXalance** demo loader, ported to the browser.
 iXalance was a small Win32 host TBL wrote in February 1998 so their DOS demos would keep
 running after DOS. It did not rewrite them: it read the original protected-mode executable
 out of an `.IXA` file, relocated it, and jumped in. This project does the same thing in
-JavaScript, interpreting the 1997 binaries instruction by instruction.
+JavaScript, executing the 1997 binaries instruction by instruction.
 
 ![Jizz, ribbons](screenshots/jizz-ribbons.png)
 ![Jizz, tunnel](screenshots/jizz-tunnel.png)
@@ -47,15 +47,16 @@ nothing else — not a PC emulator.
 | `lib/d32.js` | DOS/32A header parse and relocation |
 | `lib/machine.js` | flat address space, `gfxmodeinfo`, callback trampolines, the `startdemo` stack frame |
 | `lib/cpu.js` | 386 integer interpreter |
+| `lib/jit.js` | hot-block JavaScript compiler, with the interpreter as fallback and oracle |
 | `lib/fpu.js` | x87 core |
 | `lib/xm.js` | FastTracker II replayer, free of Web Audio so it also runs in Node |
-| `worker.js` | runs the interpreter off the main thread, posts frames as RGBA |
+| `worker.js` | runs the CPU off the main thread, posts frames as RGBA |
 | `audio.js` | builds the AudioWorklet, relays music position back to the worker |
 | `index.html` | front end: canvas, log, controls |
 | `run.mjs` | headless harness — verification, frame dumps, module dumps, WAV rendering |
 | `data/` | the three `.IXA` files, plus reference digests |
 
-Threading matters here. The interpreter runs in a **worker**, because a slice large enough
+Threading matters here. The CPU runs in a **worker**, because a slice large enough
 to make progress blocks for hundreds of milliseconds and would read as a hung tab. The XM
 replayer runs in an **AudioWorklet**, on the audio thread, because the interpreter is
 slower than real time in places and music that stalled whenever the emulation did would be
@@ -77,8 +78,14 @@ drive `PushExe`/`PopPart`/`PushPicture` across 15 executable parts, three pictur
 stored module, with four `waitmusic` synchronisation points. Only the single-block path is
 implemented, so the dropdown entry will not get far.
 
-Performance is poor in places and has not been optimised at all. Roughly 30 million
-instructions per second, interpreted, one instruction at a time.
+The browser uses the block JIT by default. Hot decoded x86 blocks become straight-line
+JavaScript while uncommon instructions fall back to the interpreter. Jizz also generates
+specialized rasterizer code at runtime; once one of those blocks starts patching only its
+constants, the JIT keeps a shape-checked function and reads the current immediates instead
+of recompiling it or abandoning it to the interpreter. On the development
+machine, a 1.5-billion-instruction Jizz run sustains roughly 130 million instructions per
+second versus 48 million in the interpreter; browser and hardware results vary. Uncheck
+**JIT**, use `?engine=cpu`, or set `IXA_ENGINE=cpu` in Node to run the reference engine.
 
 **Pixel accuracy is unverified.** The output is coherent and clearly right in character,
 but nothing has been diffed against a reference capture, so an x87 rounding difference or
@@ -101,14 +108,60 @@ recorded size.
 Other headless tools:
 
 ```
-node run.mjs run data/jizz.ixa                          # interpret, report where it stops
+node run.mjs run data/jizz.ixa                          # execute, report where it stops
 node run.mjs run data/jizz.ixa 1 20000000000 out/frames # dump frames as PNG
 node run.mjs dumpxm data/jizz.ixa out/jizz.xm           # capture the generated module
 node run.mjs renderxm out/jizz.xm out/jizz.wav 30       # render audio to WAV
 ```
 
-`IXA_FRAME_FROM`, `IXA_FRAME_EVERY` and `IXA_CLOCK` tune the frame dump and clock source.
-Jizz reaches its first real effect around frame 1200.
+`IXA_FRAME_FROM`, `IXA_FRAME_EVERY`, `IXA_CLOCK` and `IXA_ENGINE` tune frame dumping,
+clock source and CPU engine. Jizz reaches its first real effect around frame 1200.
+
+### Benchmarking by XM order
+
+Jizz and Stash change workload completely between generation, decrunching and their
+individual effects, so a whole-program instruction rate hides the sections that actually
+miss frames. The order benchmark stops immediately after the intro hands its generated XM
+to `TBL1` (the end of Jizz's decrunch/startup phase), saves the complete architectural state
+and live memory, then uses that checkpoint for subsequent runs:
+
+```
+npm run bench:jizz -- --prepare
+npm run bench:jizz -- --phase decrunch --engine jit --repeat 3
+npm run bench:jizz -- --engine both --from 0 --to 2 --repeat 3
+npm run bench:jizz -- --engine jit --orders 3,8,10-12 --repeat 3
+npm run bench:jizz -- --engine both --orders 0-21 --csv out/bench/jizz-orders.csv
+npm run bench:jizz -- --prepare-order 12
+npm run bench:stash -- --engine jit --from 4 --to 6
+```
+
+`--phase decrunch` measures only a fresh machine's startup through the completed `TBL1`
+instruction. `--from` is inclusive and `--to` exclusive. A later range automatically loads
+an exact order-start snapshot; if it is missing, the JIT advances once from the nearest
+earlier snapshot and caches every boundary it crosses. `--orders` accepts comma-separated
+orders and inclusive ranges, and runs every selected order independently from its own cold
+snapshot, so work in the gaps is neither timed nor executed repeatedly. `--budget` applies
+separately to each isolated order.
+
+`--csv FILE` writes per-order timings and rates together with JIT speedup, performance
+rank, absolute MIPS deficit from the fastest selected order, and percentage of that fastest
+rate. Use `IXA_JIT_STATS=1` on a focused JIT run to print exact uncovered forms (including
+x87 raw bytes and ModRM `/reg` forms) after the performance sweep identifies an outlier.
+
+The measured Jizz follow-up backlog and the Chrome/Safari regression from broad x87
+inlining are recorded in [JIZZ_OPTIMIZATION_NOTES.md](JIZZ_OPTIMIZATION_NOTES.md).
+
+The real XM replayer supplies order/row timing, including tempo changes, pattern breaks,
+jumps and loops, but skips sample mixing because browser audio runs on a separate thread.
+
+Checkpoints live under `out/bench/`, include CPU, FPU, machine and memory state, and never
+include decoder or JIT caches. Consequently every restored engine starts cold. The first
+benchmark creates a missing post-decrunch checkpoint automatically. `--prepare-order N`
+materializes reusable order starts through `N` without timing an order window. `--rebuild`
+regenerates the post-decrunch state after a startup-path change and ignores dependent order
+caches for that invocation; stale dependent snapshots are also rejected whenever their base
+state differs. `--rebuild --prepare` rebuilds only the base snapshot without running any
+order windows.
 
 ## Fidelity notes
 
