@@ -105,6 +105,67 @@ The original CSVs are preserved as:
 - `out/bench/stash-xm1-rows-before-span.csv`
 - `out/bench/stash-xm2-rows-before-span.csv`
 
+## Direct decoded-block reuse
+
+The 256-byte span removed most false invalidations, but the JIT still called `CPU.block()`
+before it could compare a compiled entry's saved bytes. Every stale generation therefore
+paid for a fresh x86 decode even when the code was unchanged.
+
+Compiled JIT entries now retain their last decoded block. The dispatch path:
+
+1. Reuses it immediately when its generation values match.
+2. Compares its byte snapshot when a generation is stale and reuses it if identical.
+3. Falls through to the existing decoder, version map and live-immediate shape check only
+   when bytes genuinely changed.
+
+On XM 2 order 3 rows 32–64, 191.9M of 195.6M compiled-block dispatches use this path.
+That includes 12.09M stale-generation byte proofs that no longer decode. The 3.69M genuine
+dynamic variants still use the existing shape-checked machinery.
+
+A three-repeat counter-free test improved that window from 37.6 to 43.0 MIPS. The
+interpreter/JIT differential run measured 41.4 versus 43.0 MIPS, so this phase changed from
+a JIT loss into a small JIT win while retaining an identical fingerprint.
+
+The final full sweeps measured:
+
+| Soundtrack | Original 4 KiB | 256-byte span | Span + direct reuse |
+|---|---:|---:|---:|
+| XM 1 | 49.53 MIPS | 72.25 MIPS | 88.72 MIPS |
+| XM 2 (`BLUISH`) | 32.69 MIPS | 46.92 MIPS | 51.95 MIPS |
+
+Direct reuse adds 22.8% to XM 1 and 10.7% to XM 2. Cumulative gains over the original cache
+are 79.1% and 58.9%. XM 1 order 6 rows 0–32 rose again from 86–87 to 145–148 MIPS. XM 2's
+full-sweep windows all improved by 6.6–19.9%.
+
+XM 1 order 0 rows 32–48 recorded one low 189.5-MIPS sample during the long sweep. It does
+not reproduce: a saved three-repeat focused run measures 302.7 MIPS, versus 254.5 before
+direct reuse. Use `out/bench/stash-xm1-order0-row32-direct-repeat3.csv` for that control.
+
+The span-only CSVs are preserved as:
+
+- `out/bench/stash-xm1-rows-before-direct.csv`
+- `out/bench/stash-xm2-rows-before-direct.csv`
+
+### Rejected 128-byte span
+
+A separate 128-byte experiment reduced identical byte checks from 12.1M to 7.3M in the
+XM 2 hotspot. It also split enough blocks to raise dispatches from 195.6M to 226.0M,
+increased callouts, and reduced diagnostic throughput from 42.2 to 41.0 MIPS. It was
+reverted; 256 bytes remains the measured optimum.
+
+## Browser frame delivery
+
+The CPU worker previously converted every RGB565 demo frame to a newly allocated RGBA
+buffer and posted it, even when the main thread still had an older frame waiting for
+`requestAnimationFrame()`. The main thread kept only the newest message, so the discarded
+conversions, allocations and transfers could never become visible.
+
+Frame delivery now permits one buffer in flight. After `putImageData()` synchronously
+copies it, the main thread transfers that storage back to the worker for reuse. While a
+frame is outstanding, later emulated frames still complete and advance time but skip the
+RGBA conversion and post. This is intentionally a browser smoothness/GC optimization and
+is not represented in the headless MIPS CSVs.
+
 ## Validation and remaining work
 
 - All 17 IXA container/reference checks pass.
@@ -115,9 +176,8 @@ The original CSVs are preserved as:
 - The XM checkpoints are architectural snapshots and remain valid across cache-policy
   changes; decoder and JIT caches are deliberately cold after every restore.
 
-The optimized XM 2 hotspot still measured 42.1 MIPS in the interpreter and 38.3 MIPS in the
-JIT during the differential run. Finer invalidation removed most of the avoidable loss but
-did not make this self-modifying workload a natural JIT win. Remaining callouts are led by
-`FFREE` and `FSQRT`, but callout count does not correlate with the fast control. Any future
-x87 experiment should remain one-form-at-a-time and browser-tested; the broad x87 inlining
-bundle that regressed Jizz in Chrome and Safari should not be reintroduced.
+The optimized XM 2 hotspot now measures 41.4 MIPS in the interpreter and 43.0 MIPS in the
+JIT during the differential run. Remaining callouts are led by `FFREE` and `FSQRT`, but
+callout count does not correlate with the fast control. Any future x87 experiment should
+remain one-form-at-a-time and browser-tested; the broad x87 inlining bundle that regressed
+Jizz in Chrome and Safari should not be reintroduced.

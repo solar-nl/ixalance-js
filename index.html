@@ -111,6 +111,14 @@ function draw() {
     canvas.style.aspectRatio = `${width} / ${height}`;
   }
   ctx.putImageData(new ImageData(pixels, width, height), 0, 0);
+  // The worker permits one frame in flight. putImageData() has copied it synchronously,
+  // so transfer the storage back for reuse and let the next deliverable frame through.
+  if (worker) {
+    worker.postMessage(
+      { cmd: 'frame-consumed', buffer: pixels.buffer },
+      [pixels.buffer],
+    );
+  }
 }
 
 function teardown() {
@@ -122,6 +130,7 @@ function teardown() {
   if (audio) { audio.close(); audio = null; }
   cancelAnimationFrame(raf);
   raf = 0;
+  pending = null;
 }
 
 startBtn.onclick = async () => {

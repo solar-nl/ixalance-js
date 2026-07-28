@@ -50,7 +50,7 @@ nothing else — not a PC emulator.
 | `lib/jit.js` | hot-block JavaScript compiler, with the interpreter as fallback and oracle |
 | `lib/fpu.js` | x87 core |
 | `lib/xm.js` | FastTracker II replayer, free of Web Audio so it also runs in Node |
-| `worker.js` | runs the CPU off the main thread, posts frames as RGBA |
+| `worker.js` | runs the CPU off the main thread, posts one backpressured RGBA frame |
 | `audio.js` | builds the AudioWorklet, relays music position back to the worker |
 | `index.html` | front end: canvas, log, controls |
 | `run.mjs` | headless harness — verification, frame dumps, module dumps, WAV rendering |
@@ -61,6 +61,10 @@ to make progress blocks for hundreds of milliseconds and would read as a hung ta
 replayer runs in an **AudioWorklet**, on the audio thread, because the interpreter is
 slower than real time in places and music that stalled whenever the emulation did would be
 worse than silence.
+
+The canvas bridge keeps at most one frame in flight. After `putImageData()` copies it, the
+main thread transfers the RGBA buffer back to the worker for reuse. Frames the browser
+cannot present are not converted or queued, while the emulated draw and clock still advance.
 
 That gives two clock modes, exposed as the page's sound toggle:
 
@@ -160,6 +164,8 @@ x87 raw bytes and ModRM `/reg` forms) after the performance sweep identifies an 
 
 The measured Jizz follow-up backlog and the Chrome/Safari regression from broad x87
 inlining are recorded in [JIZZ_OPTIMIZATION_NOTES.md](JIZZ_OPTIMIZATION_NOTES.md).
+Stash's two-XM row-window measurements and generated-code cache work are recorded in
+[STASH_OPTIMIZATION_NOTES.md](STASH_OPTIMIZATION_NOTES.md).
 
 The real XM replayer supplies order/row timing, including tempo changes, pattern breaks,
 jumps and loops, but skips sample mixing because browser audio runs on a separate thread.
