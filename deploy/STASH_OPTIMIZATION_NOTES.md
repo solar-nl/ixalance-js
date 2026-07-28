@@ -18,13 +18,13 @@ npm run bench:stash -- \
   --music 1 \
   --row-step 16 \
   --engine jit \
-  --csv out/bench/stash-xm1-rows.csv
+  --csv results/stash-xm1-rows.csv
 
 npm run bench:stash -- \
   --music 2 \
   --row-step 32 \
   --engine jit \
-  --csv out/bench/stash-xm2-rows.csv
+  --csv results/stash-xm2-rows.csv
 ```
 
 A single sub-order can be rerun from its exact cold snapshot:
@@ -102,8 +102,8 @@ full sweep and to 54.4 MIPS in a focused three-repeat run.
 
 The original CSVs are preserved as:
 
-- `out/bench/stash-xm1-rows-before-span.csv`
-- `out/bench/stash-xm2-rows-before-span.csv`
+- `results/stash-xm1-rows-before-span.csv`
+- `results/stash-xm2-rows-before-span.csv`
 
 ## Direct decoded-block reuse
 
@@ -139,12 +139,12 @@ full-sweep windows all improved by 6.6–19.9%.
 
 XM 1 order 0 rows 32–48 recorded one low 189.5-MIPS sample during the long sweep. It does
 not reproduce: a saved three-repeat focused run measures 302.7 MIPS, versus 254.5 before
-direct reuse. Use `out/bench/stash-xm1-order0-row32-direct-repeat3.csv` for that control.
+direct reuse. Use `results/stash-xm1-order0-row32-direct-repeat3.csv` for that control.
 
 The span-only CSVs are preserved as:
 
-- `out/bench/stash-xm1-rows-before-direct.csv`
-- `out/bench/stash-xm2-rows-before-direct.csv`
+- `results/stash-xm1-rows-before-direct.csv`
+- `results/stash-xm2-rows-before-direct.csv`
 
 ### Rejected 128-byte span
 
