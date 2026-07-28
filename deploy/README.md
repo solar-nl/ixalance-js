@@ -118,7 +118,7 @@ compared without changing the hosted files.
 | Path | Role |
 |---|---|
 | `index.html` | Canvas, controls, logs, and browser integration |
-| `worker.js` | Sequencer and CPU/JIT execution off the main thread |
+| `worker.js` | Sequencer, CPU/JIT execution and backpressured frame conversion |
 | `audio.js` | Safari-compatible AudioWorklet setup and transport |
 | `lib/cpu.js` | Reference 386 interpreter and block decoder |
 | `lib/jit.js` | Profile-guided block JIT |
