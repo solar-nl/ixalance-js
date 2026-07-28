@@ -35,6 +35,8 @@ There is no build step and there are no package dependencies.
 
 Jizz generates all graphics and its 940 KiB XM module at runtime. The initial decrunch bar
 is therefore expected; music starts only after the generated XM is handed to the host.
+Stash generates two XM modules during its run; the browser follows the handoff and tracker
+position from each one.
 
 ## Safari sound fix
 
@@ -46,6 +48,13 @@ the same `lib/xm.js` used by the worker and Node paths.
 This avoids the delayed initialization that worked in Chrome but left Safari's audio
 context suspended. Audio failures remain non-fatal: the page reports the error and continues
 with its silent virtual clock.
+
+## Browser frame delivery
+
+The worker keeps at most one converted frame in flight. Once the main thread has copied it
+to the canvas, it transfers the RGBA storage back for reuse. Emulation and music timing
+continue normally while an undrawn frame is outstanding, but redundant pixel conversion,
+allocation and message queueing are skipped.
 
 ## Jizz optimization result
 
@@ -73,10 +82,29 @@ The detailed measurements and future optimization backlog are in
 [JIZZ_OPTIMIZATION_NOTES.md](JIZZ_OPTIMIZATION_NOTES.md). The complete 22-order result is
 available as [results/jizz-orders.csv](results/jizz-orders.csv).
 
+## Stash optimization result
+
+Stash was profiled by XM order and row window because its two generated soundtracks use
+slower tracker speeds and individual orders span several visual workloads. The retained
+changes use 256-byte generated-code invalidation spans and reuse decoded blocks after a
+generation change when their saved instruction bytes still match.
+
+| Soundtrack | Original JIT | Current JIT | Gain |
+|---|---:|---:|---:|
+| XM 1 | 49.53 MIPS | 88.72 MIPS | +79.1% |
+| XM 2 (`BLUISH`) | 32.69 MIPS | 51.95 MIPS | +58.9% |
+
+The full analysis, correctness evidence and rejected 128-byte experiment are in
+[STASH_OPTIMIZATION_NOTES.md](STASH_OPTIMIZATION_NOTES.md). Current row-window results are
+[results/stash-xm1-rows.csv](results/stash-xm1-rows.csv) and
+[results/stash-xm2-rows.csv](results/stash-xm2-rows.csv).
+
 ## Validation
 
 - The full optimized CPU/JIT order sweep produced matching instruction counts, frame counts,
   and final architectural fingerprints across all 21.27 billion instructions.
+- Stash's generated-code hotspot and Jizz's browser-sensitive 3D controls also produce
+  matching interpreter/JIT boundaries and architectural fingerprints.
 - The source container verification suite passes all 17 checks.
 - Emitted-template profiling reported zero faults in the measured Jizz orders.
 - Chrome and Safari both play sound with the current Start-click initialization path.
@@ -98,6 +126,7 @@ compared without changing the hosted files.
 | `lib/xm.js` | FastTracker II replay core |
 | `data/*.ixa` | Original unmodified Jizz and Stash containers |
 | `results/jizz-orders.csv` | Per-XM-order performance data |
+| `results/stash-*-rows.csv` | Per-order, row-window performance for Stash's two XMs |
 
 ## Redistribution
 
