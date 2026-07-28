@@ -25,6 +25,8 @@ const PACE_SLACK_MS = 2, PACE_MAX_LAG_MS = 250;
 let machine, seq;
 let running = false, stopped = false;
 let slice = 1_000_000;
+let frameOutstanding = false;
+let recycledFrame = null;
 
 const post = (type, data = {}) => self.postMessage({ type, ...data });
 const log = (text, cls) => post('log', { text, cls });
@@ -76,12 +78,22 @@ async function boot({ url, clock, fps, engine }) {
       self.postMessage({ type: 'music', xm: copy.buffer }, [copy.buffer]);
     },
     onFrame: (fb, w, h) => {
-      const out = new Uint8ClampedArray(w * h * 4);
+      // The main thread can present at most one frame per animation frame. Do not convert
+      // and enqueue frames behind one it has not drawn yet; the emulated draw still
+      // completed and its clock/frame counter still advances. Once drawn, the RGBA buffer
+      // is transferred back and reused, avoiding a fresh allocation on every demo frame.
+      if (frameOutstanding) return;
+      const bytes = w * h * 4;
+      const out = recycledFrame?.byteLength === bytes
+        ? recycledFrame
+        : new Uint8ClampedArray(bytes);
+      recycledFrame = null;
       const words = new Uint32Array(out.buffer);
       for (let i = 0, n = w * h; i < n; i++) {
         const v = fb[i * 2] | (fb[i * 2 + 1] << 8);
         words[i] = 0xff000000 | ((v & 31) << 19) | (((v >> 5) & 63) << 10) | (((v >> 11) & 31) << 3);
       }
+      frameOutstanding = true;
       self.postMessage({ type: 'frame', pixels: out, width: w, height: h }, [out.buffer]);
     },
   });
@@ -228,5 +240,10 @@ self.onmessage = async (ev) => {
     // Where the audio player actually is. Once this arrives the machine stops
     // approximating the position from the module's tempo.
     machine?.setMusicPosition(msg.pos, msg.row);
+  } else if (msg.cmd === 'frame-consumed') {
+    // putImageData() has synchronously copied the pixels, so ownership can return here and
+    // the same storage can be filled for the next deliverable frame.
+    recycledFrame = new Uint8ClampedArray(msg.buffer);
+    frameOutstanding = false;
   }
 };
