@@ -1,8 +1,9 @@
-// Deterministic, order-based performance benchmarks for the generated-music 64K intros.
+// Deterministic XM-phase performance benchmarks for the generated-music 64K intros.
 //
 // A compressed post-decrunch checkpoint is captured immediately after the demo hands its
 // generated XM to TBL1. Exact order-start checkpoints branch from it on demand. Restores
 // include architectural state, tracker time and used memory, but no decode or JIT cache.
+// Long orders can additionally branch into exact row-window checkpoints.
 // The real XM replayer then advances without mixing audio and supplies the order/row clock
 // the demo reads through TBL3. A separate phase benchmark times fresh startup through TBL1.
 
@@ -56,6 +57,7 @@ function parseOptions(args) {
     rowStep: null,
     phase: null,
     orders: null,
+    rows: null,
     fromSet: false,
     toSet: false,
   };
@@ -76,7 +78,8 @@ function parseOptions(args) {
     else if (arg === '--music') opts.music = Number(value());
     else if (arg === '--row-step') opts.rowStep = Number(value());
     else if (arg === '--phase') opts.phase = value().toLowerCase();
-    else if (arg === '--orders') opts.orders = parseOrderSpec(value());
+    else if (arg === '--orders') opts.orders = parseNumberSpec(value(), '--orders');
+    else if (arg === '--rows') opts.rows = parseNumberSpec(value(), '--rows');
     else if (arg === '--prepare-order') opts.prepareOrder = Number(value());
     else if (arg === '--rebuild') opts.rebuild = true;
     else if (arg === '--prepare') opts.prepareOnly = true;
@@ -120,30 +123,36 @@ function parseOptions(args) {
   if (opts.orders !== null && (opts.fromSet || opts.toSet)) {
     throw new Error('--orders cannot be combined with --from or --to');
   }
-  if (opts.prepareOrder !== null && (opts.orders !== null || opts.fromSet || opts.toSet)) {
-    throw new Error('--prepare-order cannot be combined with --orders, --from or --to');
+  if (opts.rows !== null && opts.rowStep === null) {
+    throw new Error('--rows requires --row-step');
+  }
+  if (opts.prepareOrder !== null
+      && (opts.orders !== null || opts.rows !== null || opts.fromSet || opts.toSet
+        || opts.rowStep !== null)) {
+    throw new Error(
+      '--prepare-order cannot be combined with --orders, --from, --to or --row-step');
   }
   if (opts.phase !== null && (opts.orders !== null || opts.fromSet || opts.toSet
       || opts.prepareOnly || opts.prepareOrder !== null || opts.rebuild
       || opts.checkpoint !== null || opts.csv !== null || opts.music !== 1
-      || opts.rowStep !== null)) {
+      || opts.rowStep !== null || opts.rows !== null)) {
     throw new Error('--phase cannot be combined with order selection or checkpoint preparation');
   }
   return opts;
 }
 
-function parseOrderSpec(spec) {
-  const orders = new Set();
+function parseNumberSpec(spec, option) {
+  const values = new Set();
   for (const item of spec.split(',')) {
     const match = /^\s*(\d+)(?:\s*-\s*(\d+))?\s*$/.exec(item);
-    if (!match) throw new Error(`invalid --orders item ${JSON.stringify(item)}`);
+    if (!match) throw new Error(`invalid ${option} item ${JSON.stringify(item)}`);
     const from = Number(match[1]);
     const to = match[2] === undefined ? from : Number(match[2]);
-    if (to < from) throw new Error(`descending --orders range ${item}`);
-    for (let order = from; order <= to; order++) orders.add(order);
+    if (to < from) throw new Error(`descending ${option} range ${item}`);
+    for (let value = from; value <= to; value++) values.add(value);
   }
-  if (orders.size === 0) throw new Error('--orders needs at least one order');
-  return [...orders].sort((a, b) => a - b);
+  if (values.size === 0) throw new Error(`${option} needs at least one value`);
+  return [...values].sort((a, b) => a - b);
 }
 
 function checkpointPath(ixaPath, hash, requested) {
@@ -175,6 +184,20 @@ function rowCheckpointPath(musicStartFile, order, row) {
   return orderFile.endsWith('.cp.gz')
     ? orderFile.slice(0, -'.cp.gz'.length) + suffix
     : orderFile + suffix;
+}
+
+function playbackRowLimit(player, order) {
+  const pattern = player.patterns[player.order[order]];
+  if (!pattern) return 64;
+  for (let row = 0; row < pattern.rows; row++) {
+    for (let channel = 0; channel < player.channels; channel++) {
+      const at = (row * player.channels + channel) * 5;
+      const effect = pattern.cells[at + 3];
+      // Position jump (Bxx) and pattern break (Dxx) both leave after the current row.
+      if (effect === 0x0b || effect === 0x0d) return row + 1;
+    }
+  }
+  return pattern.rows;
 }
 
 function captureCpu(cpu) {
@@ -1124,6 +1147,125 @@ function runSelectedOrders(checkpoints, Engine, engineName, opts) {
   };
 }
 
+function runRowWindow(checkpoint, Engine, engineName, window, opts) {
+  let cpu = null;
+  let player = null;
+  let advancedSamples = 0;
+  let clockMilliseconds = 0;
+  let stop = false;
+  let musicChanged = false;
+  let measurement = null;
+  let lastSeenRow = window.row;
+  let started = 0;
+
+  const finish = (boundary) => {
+    if (measurement !== null) return;
+    const ended = performance.now();
+    const sameOrder = player.position === window.order;
+    measurement = {
+      order: window.order,
+      occurrence: checkpoint.timeline?.occurrence ?? 0,
+      pattern: player.order[window.order] ?? -1,
+      rowStart: window.row,
+      rowEnd: sameOrder ? player.row : lastSeenRow + 1,
+      endOrder: player.position,
+      endRow: player.row,
+      boundary,
+      instructions: cpu.count,
+      frames: machine.frames - checkpoint.machine.scalars.frames,
+      milliseconds: (ended - started) - clockMilliseconds,
+    };
+    stop = true;
+  };
+
+  const hooks = {
+    onFrame: () => {
+      if (stop) return;
+      const clockStarted = performance.now();
+      const beforeOrder = player.position;
+      const beforeRow = player.row;
+      const target = Math.max(0, Math.floor(
+        (machine.virtualMs - checkpoint.machine.scalars.virtualMs) * SAMPLE_RATE / 1000));
+      if (target > advancedSamples) {
+        player.skip(target - advancedSamples);
+        advancedSamples = target;
+      }
+      machine.setMusicPosition(player.position, player.row);
+      clockMilliseconds += performance.now() - clockStarted;
+
+      if (beforeOrder === window.order) lastSeenRow = beforeRow;
+      if (player.position === window.order) lastSeenRow = player.row;
+      if (player.loops > (checkpoint.timeline?.loops ?? 0)) finish('loop');
+      else if (player.position !== window.order) finish('order');
+      else if (player.row >= window.rowEnd) finish('row');
+    },
+    onMusic: () => { musicChanged = true; },
+  };
+
+  const machine = restoreMachine(checkpoint, hooks);
+  player = restorePlayer(checkpoint);
+  machine.setMusicPosition(player.position, player.row);
+  const BoundaryEngine = stoppingEngine(
+    Engine, () => stop || musicChanged, NEXT_MUSIC_READY);
+  cpu = restoreCpu(BoundaryEngine, machine, checkpoint.cpu);
+  started = performance.now();
+
+  while (!stop && !cpu.halted && cpu.count < opts.budget) {
+    try {
+      cpu.run(Math.min(opts.slice, opts.budget - cpu.count));
+    } catch (error) {
+      if (error !== NEXT_MUSIC_READY) throw error;
+      if (musicChanged && !stop) finish('music');
+    }
+  }
+  if (!stop) finish(cpu.halted ? 'halt' : 'budget');
+
+  return {
+    engine: engineName,
+    rows: [measurement],
+    halted: cpu.halted,
+    haltReason: cpu.haltReason,
+    budgetHit: cpu.count >= opts.budget && measurement.boundary === 'budget',
+    musicChanged,
+    finalOrder: player.position,
+    finalRow: player.row,
+    totalInstructions: cpu.count,
+    fingerprint: fingerprint(cpu, machine, player),
+  };
+}
+
+function runSelectedRowWindows(windows, Engine, engineName, opts) {
+  const outcomes = [];
+  const rows = [];
+  for (const window of windows) {
+    const result = runRowWindow(
+      window.checkpoint, Engine, engineName, window, opts);
+    outcomes.push({ window, result });
+    rows.push(...result.rows);
+  }
+  const stopped = outcomes.find(({ result }) => result.budgetHit || result.halted)
+    ?? outcomes[outcomes.length - 1];
+  return {
+    engine: engineName,
+    rows,
+    halted: outcomes.some(({ result }) => result.halted),
+    haltReason: stopped.result.haltReason,
+    budgetHit: outcomes.some(({ result }) => result.budgetHit),
+    musicChanged: outcomes.some(({ result }) => result.musicChanged),
+    finalOrder: stopped.result.finalOrder,
+    finalRow: stopped.result.finalRow,
+    totalInstructions: outcomes.reduce(
+      (sum, { result }) => sum + result.totalInstructions, 0),
+    budgetWindows: outcomes.filter(({ result }) => result.budgetHit)
+      .map(({ window }) => `${window.order}:${window.row}`),
+    haltedWindows: outcomes.filter(({ result }) => result.halted)
+      .map(({ window }) => `${window.order}:${window.row}`),
+    fingerprint: sha256(JSON.stringify(outcomes.map(({ window, result }) => [
+      window.order, window.row, result.fingerprint,
+    ]))),
+  };
+}
+
 function averageDecrunchRuns(runs) {
   const first = runs[0];
   for (const run of runs) {
@@ -1207,6 +1349,9 @@ function averageRuns(runs) {
     const peers = runs.map((run) => run.rows[index]);
     for (const peer of peers) {
       if (!peer || peer.order !== row.order || peer.occurrence !== row.occurrence
+          || peer.rowStart !== row.rowStart || peer.rowEnd !== row.rowEnd
+          || peer.endOrder !== row.endOrder || peer.endRow !== row.endRow
+          || peer.boundary !== row.boundary
           || peer.instructions !== row.instructions || peer.frames !== row.frames) {
         throw new Error(`non-deterministic ${first.engine} result at order ${row.order}`);
       }
@@ -1274,12 +1419,72 @@ function printComparison(cpu, jit, player) {
     + ` tracker: ${player.songLength} orders, ${player.totalRows} nominal rows\n`);
 }
 
+function rowWindowLabel(row) {
+  return `${row.order}:${String(row.rowStart).padStart(2, '0')}`
+    + `-${String(row.rowEnd).padStart(2, '0')}`;
+}
+
+function printRowSingle(result, player) {
+  process.stdout.write(`\n${result.engine.toUpperCase()}\n`
+    + ' window       pat  frames    instructions      ms     M/s  boundary\n');
+  for (const row of result.rows) {
+    process.stdout.write(
+      ` ${rowWindowLabel(row).padStart(11)}  ${String(row.pattern).padStart(3)}  `
+      + `${String(row.frames).padStart(6)}  ${integer(row.instructions).padStart(14)}  `
+      + `${row.milliseconds.toFixed(1).padStart(7)}  `
+      + `${rate(row.instructions, row.milliseconds).toFixed(1).padStart(6)}  `
+      + `${row.boundary}\n`);
+  }
+  const instructions = result.rows.reduce((sum, row) => sum + row.instructions, 0);
+  const ms = result.rows.reduce((sum, row) => sum + row.milliseconds, 0);
+  process.stdout.write(
+    ` total                  ${integer(instructions).padStart(14)}  `
+    + `${ms.toFixed(1).padStart(7)}  ${rate(instructions, ms).toFixed(1).padStart(6)}\n`
+    + ` tracker: ${player.songLength} orders, ${player.totalRows} nominal rows\n`);
+}
+
+function printRowComparison(cpu, jit, player) {
+  if (cpu.fingerprint !== jit.fingerprint) {
+    throw new Error('CPU/JIT architectural fingerprints differ after the row windows');
+  }
+  if (cpu.rows.length !== jit.rows.length) {
+    throw new Error(`CPU produced ${cpu.rows.length} row windows, JIT produced ${jit.rows.length}`);
+  }
+  process.stdout.write('\n'
+    + ' window       pat  frames    instructions   CPU M/s   JIT M/s  speedup  boundary\n');
+  for (let i = 0; i < cpu.rows.length; i++) {
+    const a = cpu.rows[i];
+    const b = jit.rows[i];
+    if (a.order !== b.order || a.rowStart !== b.rowStart || a.rowEnd !== b.rowEnd
+        || a.endOrder !== b.endOrder || a.endRow !== b.endRow
+        || a.boundary !== b.boundary || a.pattern !== b.pattern
+        || a.instructions !== b.instructions || a.frames !== b.frames) {
+      throw new Error(`CPU/JIT row window differs at result ${i}`);
+    }
+    const ar = rate(a.instructions, a.milliseconds);
+    const br = rate(b.instructions, b.milliseconds);
+    process.stdout.write(
+      ` ${rowWindowLabel(a).padStart(11)}  ${String(a.pattern).padStart(3)}  `
+      + `${String(a.frames).padStart(6)}  ${integer(a.instructions).padStart(14)}  `
+      + `${ar.toFixed(1).padStart(8)}  ${br.toFixed(1).padStart(8)}  `
+      + `${(br / ar).toFixed(2).padStart(7)}x  ${a.boundary}\n`);
+  }
+  const ins = cpu.rows.reduce((sum, row) => sum + row.instructions, 0);
+  const cpuMs = cpu.rows.reduce((sum, row) => sum + row.milliseconds, 0);
+  const jitMs = jit.rows.reduce((sum, row) => sum + row.milliseconds, 0);
+  process.stdout.write(
+    ` total                  ${integer(ins).padStart(14)}  `
+    + `${rate(ins, cpuMs).toFixed(1).padStart(8)}  ${rate(ins, jitMs).toFixed(1).padStart(8)}  `
+    + `${(cpuMs / jitMs).toFixed(2).padStart(7)}x\n`
+    + ` tracker: ${player.songLength} orders, ${player.totalRows} nominal rows\n`);
+}
+
 function writeOrderCsv(results, requested, music, player) {
   const file = resolve(requested);
   const cpu = results.find((result) => result.engine === 'cpu') ?? null;
   const jit = results.find((result) => result.engine === 'jit') ?? null;
   const primary = jit ?? cpu;
-  const key = (row) => `${row.order}:${row.occurrence}`;
+  const key = (row) => `${row.order}:${row.occurrence}:${row.rowStart ?? ''}`;
   const cpuRows = new Map((cpu?.rows ?? []).map((row) => [key(row), row]));
   const jitRows = new Map((jit?.rows ?? []).map((row) => [key(row), row]));
   const measured = primary.rows.map((row) => {
@@ -1297,15 +1502,17 @@ function writeOrderCsv(results, requested, music, player) {
   const number = (value, digits) => value === null ? '' : value.toFixed(digits);
   const text = (value) => `"${String(value).replaceAll('"', '""')}"`;
   const lines = [
-    'music,music_title,order,occurrence,pattern,frames,instructions,'
+    'music,music_title,order,row_start,row_end,end_order,end_row,boundary,'
+      + 'occurrence,pattern,frames,instructions,'
       + 'cpu_ms,cpu_mips,jit_ms,jit_mips,'
       + 'jit_speedup,rank,deficit_from_fastest_mips,pct_of_fastest',
   ];
   for (const x of measured) {
     const { row, c, j, cpuRate, jitRate, primaryRate } = x;
     lines.push([
-      music, text(player.title), row.order, row.occurrence, row.pattern, row.frames,
-      row.instructions,
+      music, text(player.title), row.order, row.rowStart ?? '', row.rowEnd ?? '',
+      row.endOrder ?? '', row.endRow ?? '', row.boundary ?? '',
+      row.occurrence, row.pattern, row.frames, row.instructions,
       number(c?.milliseconds ?? null, 3), number(cpuRate, 3),
       number(j?.milliseconds ?? null, 3), number(jitRate, 3),
       number(cpuRate !== null && jitRate !== null ? jitRate / cpuRate : null, 4),
@@ -1315,7 +1522,7 @@ function writeOrderCsv(results, requested, music, player) {
   }
   mkdirSync(dirname(file), { recursive: true });
   writeFileSync(file, lines.join('\n') + '\n');
-  process.stdout.write(`Wrote order performance CSV ${file}\n`);
+  process.stdout.write(`Wrote performance CSV ${file}\n`);
 }
 
 export function benchmarkIxa(ixaPath, args = []) {
@@ -1369,7 +1576,44 @@ export function benchmarkIxa(ixaPath, args = []) {
   }
 
   const checkpoints = new Map();
-  if (opts.orders !== null) {
+  const rowWindows = [];
+  if (opts.rowStep !== null) {
+    const selectedOrders = opts.orders
+      ?? Array.from({ length: opts.to - opts.from }, (_, index) => opts.from + index);
+    for (const order of selectedOrders) {
+      const orderCheckpoint = ensureOrderCheckpoint(
+        checkpoint, file, hash, originState, order, opts);
+      checkpoints.set(order, orderCheckpoint);
+      const reachableRows = playbackRowLimit(player, order);
+      for (let row = 0; row < reachableRows; row += opts.rowStep) {
+        if (opts.rows !== null && !opts.rows.includes(row)) continue;
+        const rowCheckpoint = ensureRowCheckpoint(
+          checkpoint,
+          file,
+          hash,
+          originState,
+          orderCheckpoint,
+          order,
+          row,
+          opts,
+        );
+        if (rowCheckpoint === null) break;
+        rowWindows.push({
+          order,
+          row,
+          rowEnd: Math.min(row + opts.rowStep, reachableRows),
+          checkpoint: rowCheckpoint,
+        });
+      }
+    }
+    if (rowWindows.length === 0) {
+      throw new Error('the selected --rows do not identify a reachable row window');
+    }
+    process.stdout.write(
+      `Benchmarking ${rowWindows.length} isolated row windows in orders `
+      + `${selectedOrders.join(',')}, ${opts.repeat} run(s), ${opts.rowStep}-row step, `
+      + 'exact row snapshots, cold engine caches, exact XM clock without audio mixing\n');
+  } else if (opts.orders !== null) {
     for (const order of opts.orders) {
       checkpoints.set(
         order,
@@ -1398,9 +1642,13 @@ export function benchmarkIxa(ixaPath, args = []) {
     const runs = [];
     for (let i = 0; i < opts.repeat; i++) {
       process.stdout.write(`  ${name} ${i + 1}/${opts.repeat}...\n`);
-      runs.push(opts.orders === null
-        ? runOrders(checkpoints.get(opts.from), Engine, name, opts)
-        : runSelectedOrders(checkpoints, Engine, name, opts));
+      if (opts.rowStep !== null) {
+        runs.push(runSelectedRowWindows(rowWindows, Engine, name, opts));
+      } else {
+        runs.push(opts.orders === null
+          ? runOrders(checkpoints.get(opts.from), Engine, name, opts)
+          : runSelectedOrders(checkpoints, Engine, name, opts));
+      }
     }
     results.push(averageRuns(runs));
   }
@@ -1408,14 +1656,20 @@ export function benchmarkIxa(ixaPath, args = []) {
   if (results.length === 2) {
     const cpu = results.find((result) => result.engine === 'cpu');
     const jit = results.find((result) => result.engine === 'jit');
-    printComparison(cpu, jit, player);
+    if (opts.rowStep === null) printComparison(cpu, jit, player);
+    else printRowComparison(cpu, jit, player);
   } else {
-    printSingle(results[0], player);
+    if (opts.rowStep === null) printSingle(results[0], player);
+    else printRowSingle(results[0], player);
   }
   if (opts.csv !== null) writeOrderCsv(results, opts.csv, opts.music, player);
   for (const result of results) {
     if (result.budgetHit) {
-      if (opts.orders !== null) {
+      if (opts.rowStep !== null) {
+        process.stdout.write(
+          `warning: ${result.engine} hit the per-window ${integer(opts.budget)} instruction `
+          + `budget for ${result.budgetWindows.join(',')}\n`);
+      } else if (opts.orders !== null) {
         process.stdout.write(
           `warning: ${result.engine} hit the per-order ${integer(opts.budget)} instruction `
           + `budget for selected order(s) ${result.budgetOrders.join(',')}\n`);
@@ -1425,7 +1679,9 @@ export function benchmarkIxa(ixaPath, args = []) {
           + `${result.finalOrder}:${result.finalRow}\n`);
       }
     } else if (result.halted) {
-      const where = opts.orders !== null
+      const where = opts.rowStep !== null
+        ? `row window(s) ${result.haltedWindows.join(',')}`
+        : opts.orders !== null
         ? `selected order(s) ${result.haltedOrders.join(',')}`
         : `${result.finalOrder}:${result.finalRow}`;
       process.stdout.write(

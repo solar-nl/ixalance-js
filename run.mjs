@@ -7,10 +7,13 @@
 //       Name a block to load and run that one alone, for probing a part in isolation.
 //   node run.mjs dumpxm <file.ixa> <out.xm>    capture the module a part generates
 //   node run.mjs renderxm <file.xm> <out.wav> [seconds]
-//   node run.mjs bench <file.ixa> [options]     benchmark generated-music intros by XM order
+//   node run.mjs bench <file.ixa> [options]     benchmark generated-music intros by XM phase
 //       --engine cpu|jit|both  --from ORDER  --to ORDER  --repeat N
 //       --orders 1,4,7-9      run only those orders, each from an exact cached boundary
-//       --csv FILE             write ranked per-order CPU/JIT performance data
+//       --music N              select a generated XM (one-based; Stash has two)
+//       --row-step N           split selected orders into exact N-row windows
+//       --rows 0,16,32         with --row-step, run only these row starts
+//       --csv FILE             write ranked CPU/JIT performance data
 //       --phase decrunch      time fresh startup through the generated-XM handoff
 //       --prepare             only build the cached post-decrunch checkpoint
 //       --prepare-order N     cache exact order starts through N, then exit

@@ -117,7 +117,7 @@ node run.mjs renderxm out/jizz.xm out/jizz.wav 30       # render audio to WAV
 `IXA_FRAME_FROM`, `IXA_FRAME_EVERY`, `IXA_CLOCK` and `IXA_ENGINE` tune frame dumping,
 clock source and CPU engine. Jizz reaches its first real effect around frame 1200.
 
-### Benchmarking by XM order
+### Benchmarking by XM phase
 
 Jizz and Stash change workload completely between generation, decrunching and their
 individual effects, so a whole-program instruction rate hides the sections that actually
@@ -133,6 +133,9 @@ npm run bench:jizz -- --engine jit --orders 3,8,10-12 --repeat 3
 npm run bench:jizz -- --engine both --orders 0-21 --csv out/bench/jizz-orders.csv
 npm run bench:jizz -- --prepare-order 12
 npm run bench:stash -- --engine jit --from 4 --to 6
+npm run bench:stash -- --music 1 --row-step 16 --engine jit --csv out/bench/stash-xm1-rows.csv
+npm run bench:stash -- --music 2 --row-step 32 --engine jit --csv out/bench/stash-xm2-rows.csv
+npm run bench:stash -- --music 1 --orders 0 --row-step 16 --rows 16
 ```
 
 `--phase decrunch` measures only a fresh machine's startup through the completed `TBL1`
@@ -143,7 +146,14 @@ orders and inclusive ranges, and runs every selected order independently from it
 snapshot, so work in the gaps is neither timed nor executed repeatedly. `--budget` applies
 separately to each isolated order.
 
-`--csv FILE` writes per-order timings and rates together with JIT speedup, performance
+Stash hands two generated XMs to `TBL1`; `--music N` selects them using a one-based index.
+`--row-step N` divides each selected order into independently restorable row windows, and
+`--rows` can focus the run on particular window starts. Pattern breaks and jumps shorten
+the last window instead of creating unreachable snapshots. This matters for Stash: its
+first XM normally uses speed 24 and is profiled in 16-row windows, while its second XM
+starts at speed 12 and is profiled in 32-row windows.
+
+`--csv FILE` writes phase timings and rates together with JIT speedup, performance
 rank, absolute MIPS deficit from the fastest selected order, and percentage of that fastest
 rate. Use `IXA_JIT_STATS=1` on a focused JIT run to print exact uncovered forms (including
 x87 raw bytes and ModRM `/reg` forms) after the performance sweep identifies an outlier.
@@ -161,7 +171,8 @@ materializes reusable order starts through `N` without timing an order window. `
 regenerates the post-decrunch state after a startup-path change and ignores dependent order
 caches for that invocation; stale dependent snapshots are also rejected whenever their base
 state differs. `--rebuild --prepare` rebuilds only the base snapshot without running any
-order windows.
+order windows. Row-window snapshots use `(music, order, row)` identity, so the two Stash
+soundtracks cannot collide even when they share order and row numbers.
 
 ## Fidelity notes
 
