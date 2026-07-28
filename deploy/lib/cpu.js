@@ -459,8 +459,8 @@ export class CPU {
    * A hit bumps the generation of the 256-byte span the write lands in. The block-size
    * invariant above means a block only has to remember two spans. codeDirty also makes a
    * block that patched itself stop after the offending instruction instead of running on
-   * stale records. Chunks past the map read undefined, which fails === 1 and leaves the
-   * fault to the DataView.
+   * from stale records. Chunks past the map read undefined, which fails === 1 and leaves
+   * the fault to the DataView.
    */
   codeWrite(addr, size) {
     const k = addr >> 4;
