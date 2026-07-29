@@ -84,7 +84,8 @@
 // other three memory-arithmetic opcodes (d8 m32, da m32int, de m16int — one skeleton
 // parameterised by the DataView read), all four loads (fld m32/m64, fild m32/m16), all four
 // float stores (fst/fstp m32/m64) and fist m32, and replaces the F.round() call in the
-// integer stores with a character-for-character inline of fpu.js:69-84. That takes the peak
+// integer stores with a character-for-character inline of fpu.js's nearest rounding plus
+// its range/NaN check. That takes the peak
 // generation window from 99.4% of its 22 forms uncompiled-by-one to 99.4% compiled, and the
 // jizz+stash union to ~93%.
 //
@@ -205,6 +206,10 @@
 
 import { CPU, Unimplemented, Fault } from './cpu.js';
 
+// Required by worker.js for the same reason as FPU_REVISION: a stale cached JIT must fail
+// visibly rather than revive JavaScript's old NaN/overflow-to-zero integer stores.
+export const JIT_REVISION = 'live-smc-operands-v2';
+
 // Same identities, not lookalikes: run.mjs:189 and worker.js:109 test `instanceof`, and a
 // locally re-declared class of the same name would escape both as an unhandled error.
 export { Unimplemented, Fault };
@@ -272,6 +277,54 @@ function shapeMatches(b, shape) {
     }
   }
   return true;
+}
+
+/**
+ * Describe the bytes a live-immediate block is allowed to change without changing its
+ * decode shape, and how those bytes map back onto the retained decode records.
+ *
+ * The old live tier still called CPU.compile() after every patch, then proved the freshly
+ * decoded block had the same shape. Astral's tunnel rasterizer patches tens of thousands
+ * of displacement/immediate fields per frame, so that proof became the renderer. Opcode,
+ * prefix, ModRM and SIB bytes are the invariant; only the displacement and immediate byte
+ * ranges below can be refreshed in place.
+ *
+ * fields is a flat Int32Array of {kind, op-index, absolute-address} triples:
+ *   1 disp8, 2 disp32, 3 imm8, 4 imm16, 5 imm32.
+ * Six-byte far pointers stay invariant. No live demo changes one, and treating it as fixed
+ * is the safe fallback: a write then takes the ordinary decode/shape-check path.
+ */
+function liveLayout(b) {
+  const start = b.start;
+  const end = b.ops[b.ops.length - 1].fall;
+  const mask = new Uint8Array(end - start);
+  const fields = [];
+  const mark = (at, bytes) => {
+    for (let p = at - start, n = p + bytes; p < n; p++) mask[p] = 1;
+  };
+
+  for (let k = 0; k < b.ops.length; k++) {
+    const o = b.ops[k];
+    let dispBytes = 0;
+    if (o.mlen !== 0 && o.mod !== 3) {
+      if (o.mod === 1) dispBytes = 1;
+      else if (o.mod === 2 || (o.mod === 0 && (o.rm === 5 || (o.rm === 4 && o.base < 0)))) {
+        dispBytes = 4;
+      }
+    }
+    if (dispBytes !== 0) {
+      const at = o.ipos - dispBytes;
+      mark(at, dispBytes);
+      fields.push(dispBytes === 1 ? 1 : 2, k, at);
+    }
+
+    const immBytes = o.fall - o.ipos;
+    if (immBytes === 1 || immBytes === 2 || immBytes === 4) {
+      mark(o.ipos, immBytes);
+      fields.push(immBytes === 1 ? 3 : immBytes === 2 ? 4 : 5, k, o.ipos);
+    }
+  }
+  return { mask, fields: Int32Array.from(fields) };
 }
 
 /** FNV-1a over a byte span. Only ever a version-map key: every hit is confirmed by a full
@@ -990,9 +1043,9 @@ function x87Stores(o) {
 //
 // lib/fpu.js REMAINS THE ORACLE. The target is bit-identical agreement with THAT FILE, not
 // with a 387 and not with the Intel manual: the register stack is JS doubles by deliberate
-// compromise (fpu.js:3-7), fisttp honours RC where hardware always truncates, round(-0.5)
-// returns +0, and arith() slots 2/3 write NaN. Emitted code that is "more correct" than
-// fpu.js is WRONG. Every arm below transcribes one numbered line of that file and cites it.
+// compromise (fpu.js:3-7), round(-0.5) returns +0, and arith() slots 2/3 write NaN. Emitted
+// code must nevertheless match fpu.js exactly, including x87's integer-indefinite result
+// for NaN and overflow. Every arm below transcribes one numbered line of that file.
 // No Math.fround anywhere: it would be closer to a real 387 and therefore a defect.
 //
 // STATE IS FIELD-RESIDENT. Nothing — not st(0), not top — is cached in a block local across
@@ -1162,10 +1215,10 @@ const X87_ROUND = [
  *
  * STILL A CALLOUT, EACH FOR A STATED REASON — every one of these is DEAD in both traces, so
  * "it looked right" is the only evidence a transcription could ever have:
- *   db /1  fisttp        honours RC where a real 387 always truncates (fpu.js:311). An
- *                        oracle bug must keep exactly one implementation.
- *   df /2 /3  fist/fistp m16   passes the rounded DOUBLE to setInt16 with no `| 0`
- *                        (fpu.js:360-361) — equivalent, and pure risk to restate.
+ *   db /1  fisttp        always truncates and performs the same invalid-result check as
+ *                        the other integer stores; dead in the measured traces.
+ *   df /2 /3  fist/fistp m16   uses the 16-bit integer-indefinite boundary rather than
+ *                        the m32 boundary below; pure risk to restate while it is cold.
  *   df /5 /7  fild/fistp m64   hi * 2^32 + lo through a double, lossy above 2^53.
  *   db /5 /7  fld/fstp m80     readExtended/writeExtended, where fpu.js:109 is unreachable
  *                        and a NaN is stored as +/-Infinity. Never give that a second home.
@@ -1312,10 +1365,9 @@ function x87Tmpl(o, k, E) {
     return join(s);
   }
 
-  // fist m32 (fpu.js:312) and fistp m32 (:313) — the same three lines apart from the pop.
-  // `| 0` is kept verbatim for its modulo-2^32 wrap (measured: exactly one occurrence in 3e8
-  // of stash, none in 6e8 of jizz — reachable and essentially untested). `>>> 0` would write
-  // identical bytes through setInt32's ToInt32 and is still not the oracle's text.
+  // fist m32 and fistp m32 — the same conversion and store apart from the pop. Masked x87
+  // invalid conversion stores 0x80000000 and raises IE; JavaScript's old `| 0` coercion
+  // instead wrapped overflow and mapped NaN to zero, visibly corrupting Astral Blur.
   if (op === 0xdb && (reg === 2 || reg === 3)) {
     E.x87 = true;
     const s = [
@@ -1324,7 +1376,10 @@ function x87Tmpl(o, k, E) {
       barrierSrc(E, 'xe', 4),
       `const t = F.top | 0, xv = ST[t];`,
       ...X87_ROUND,
-      `M.setInt32(xe, xq | 0, true);`,
+      `if (!Number.isFinite(xq) || xq < -0x80000000 || xq > 0x7fffffff) {`,
+      `  F.sw |= 1; xq = -0x80000000;`,
+      `}`,
+      `M.setInt32(xe, xq, true);`,
     ];
     if (reg === 3) s.push('TG[t] = 1; F.top = (t + 1) & 7;');
     s.push(...x87Stat(reg === 3 ? 'Istp' : 'Ist'));
@@ -1738,6 +1793,13 @@ export class JitCPU extends CPU {
       if (STATS) this.jitDirectHits++;
       return e;
     }
+    // A promoted rasterizer has already proved that only displacement/immediate bytes
+    // churn. Validate its structural bytes and refill those operands directly instead of
+    // throwing the retained block through CPU.compile() tens of thousands of times.
+    if (e.dynamic && this.jitRefreshDynamic(e)) {
+      if (STATS) this.jitDirectHits++;
+      return e;
+    }
     if (!bytesEq(this.u8, e.start, e.snap)) return null;
 
     const b = e.block;
@@ -1791,12 +1853,53 @@ export class JitCPU extends CPU {
       e = {
         start: b.start, hits: 0, fn: null, mods: null, snap: null, byteLen: 0, hash: 0,
         p0: 0, p1: 0, g0: 0, g1: 0, tmplIns: 0, callIns: 0, callIds: null,
-        versions: null, shape: null, block: null, versionCount: 0,
+        versions: null, shape: null, liveMask: null, liveFields: null,
+        block: null, versionCount: 0,
         poisoned: false, dynamic: false,
       };
       this.jitTab.set(b.start, e);
     }
     return e;
+  }
+
+  /**
+   * Refresh a structurally-stable self-modifying block without decoding it again.
+   *
+   * First prove every non-operand byte still matches the version from which the live
+   * function was compiled. Only then mutate the retained records, so a failed proof can
+   * fall through to CPU.compile() with the old block still internally consistent.
+   */
+  jitRefreshDynamic(e) {
+    const u8 = this.u8, mask = e.liveMask, snap = e.snap;
+    if (mask === null || snap === null || e.block === null) return false;
+    const start = e.start;
+    for (let k = 0; k < mask.length; k++) {
+      if (mask[k] === 0 && u8[start + k] !== snap[k]) return false;
+    }
+
+    const fields = e.liveFields, ops = e.block.ops, mem = this.mem;
+    for (let p = 0; p < fields.length; p += 3) {
+      const kind = fields[p], o = ops[fields[p + 1]], at = fields[p + 2];
+      if (kind === 1) {
+        o.disp = (u8[at] << 24) >> 24;
+      } else if (kind === 2) {
+        o.disp = mem.getInt32(at, true);
+      } else {
+        let imm;
+        if (kind === 3) imm = u8[at];
+        else if (kind === 4) imm = mem.getUint16(at, true);
+        else imm = mem.getInt32(at, true);
+        o.imm = imm;
+        o.simm = kind === 3 ? (imm << 24) >> 24 : imm;
+        o.target = (o.fall + o.simm) >>> 0;
+      }
+    }
+
+    const b = e.block;
+    e.g0 = b.g0 = this.pageGen[e.p0];
+    e.g1 = b.g1 = this.pageGen[e.p1];
+    this.jitDynamicHits++;
+    return true;
   }
 
   /**
@@ -1873,9 +1976,15 @@ export class JitCPU extends CPU {
     e.dynamic = live;
     e.shape = live ? blockShape(b) : null;
     if (live) {
+      const layout = liveLayout(b);
+      e.liveMask = layout.mask;
+      e.liveFields = layout.fields;
       e.versions = null;
       e.versionCount = 0;
       this.jitDynamic++;
+    } else {
+      e.liveMask = null;
+      e.liveFields = null;
     }
     this.jitCensus(b, e, live);
     if (!live && e.versions !== null) {
@@ -1915,7 +2024,8 @@ export class JitCPU extends CPU {
    *  by construction — but a later tier that forgets that would find a stale one. */
   jitPoison(e) {
     e.poisoned = true; e.fn = null; e.mods = null; e.snap = null; e.versions = null;
-    e.shape = null; e.callIds = null; e.block = null; e.dynamic = false;
+    e.shape = null; e.liveMask = null; e.liveFields = null;
+    e.callIds = null; e.block = null; e.dynamic = false;
     return null;
   }
 

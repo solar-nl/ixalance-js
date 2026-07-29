@@ -15,6 +15,8 @@
 
 const RC_NEAREST = 0, RC_DOWN = 1, RC_UP = 2, RC_TRUNC = 3;
 
+export const FPU_REVISION = 'x87-integer-indefinite-v1';
+
 export class FPU {
   constructor(cpu) {
     this.cpu = cpu;
@@ -81,6 +83,33 @@ export class FPU {
         return (f % 2 === 0) ? f : f + 1;
       }
     }
+  }
+
+  /**
+   * Convert an x87 value for FIST/FISTP/FISTTP.
+   *
+   * With the default masked invalid-operation exception, real x87 does not wrap an
+   * out-of-range result and does not turn NaN into zero. It stores the format's
+   * "integer indefinite" value instead: 0x8000, 0x80000000 or 0x8000000000000000.
+   * Astral Blur deliberately reaches the overflow case while building polar-coordinate
+   * lookup tables; JavaScript's `| 0` made those invalid coordinates look usable and
+   * moved source pixels into the centre of several effects.
+   */
+  integer(v, bits, truncate = false) {
+    const r = truncate ? Math.trunc(v) : this.round(v);
+    let invalid = !Number.isFinite(r);
+    if (bits === 16) invalid ||= r < -0x8000 || r > 0x7fff;
+    else if (bits === 32) invalid ||= r < -0x80000000 || r > 0x7fffffff;
+    // 2^63 is exactly representable as a double; 2^63-1 is not, so the upper bound is
+    // exclusive. -2^63 remains a valid signed result even though it is also the
+    // indefinite bit pattern.
+    else invalid ||= r < -0x8000000000000000 || r >= 0x8000000000000000;
+
+    if (invalid) {
+      this.sw |= 1;                    // IE: masked invalid-operation exception
+      return null;
+    }
+    return r;
   }
 
   // ------------------------------------------------------- 80-bit extended format
@@ -308,9 +337,26 @@ export class FPU {
         if (isMem) {
           switch (reg) {
             case 0: this.push(cpu.mem.getInt32(m.addr, true)); return;         // fild m32
-            case 1: cpu.codeWrite(m.addr, 4); cpu.mem.setInt32(m.addr, this.round(this.get(0)) | 0, true); this.pop(); return; // fisttp
-            case 2: cpu.codeWrite(m.addr, 4); cpu.mem.setInt32(m.addr, this.round(this.get(0)) | 0, true); return; // fist
-            case 3: cpu.codeWrite(m.addr, 4); cpu.mem.setInt32(m.addr, this.round(this.pop()) | 0, true); return;  // fistp
+            case 1: {                                                        // fisttp m32
+              const v = this.integer(this.get(0), 32, true);
+              cpu.codeWrite(m.addr, 4);
+              cpu.mem.setInt32(m.addr, v === null ? -0x80000000 : v, true);
+              this.pop();
+              return;
+            }
+            case 2: {                                                        // fist m32
+              const v = this.integer(this.get(0), 32);
+              cpu.codeWrite(m.addr, 4);
+              cpu.mem.setInt32(m.addr, v === null ? -0x80000000 : v, true);
+              return;
+            }
+            case 3: {                                                        // fistp m32
+              const v = this.integer(this.get(0), 32);
+              cpu.codeWrite(m.addr, 4);
+              cpu.mem.setInt32(m.addr, v === null ? -0x80000000 : v, true);
+              this.pop();
+              return;
+            }
             case 5: this.push(this.readExtended(m.addr)); return;              // fld m80
             case 7: this.writeExtended(m.addr, this.pop()); return;            // fstp m80
           }
@@ -357,8 +403,19 @@ export class FPU {
         if (isMem) {
           switch (reg) {
             case 0: this.push(cpu.mem.getInt16(m.addr, true)); return;         // fild m16
-            case 2: cpu.codeWrite(m.addr, 2); cpu.mem.setInt16(m.addr, this.round(this.get(0)), true); return;  // fist m16
-            case 3: cpu.codeWrite(m.addr, 2); cpu.mem.setInt16(m.addr, this.round(this.pop()), true); return;   // fistp m16
+            case 2: {                                                        // fist m16
+              const v = this.integer(this.get(0), 16);
+              cpu.codeWrite(m.addr, 2);
+              cpu.mem.setInt16(m.addr, v === null ? -0x8000 : v, true);
+              return;
+            }
+            case 3: {                                                        // fistp m16
+              const v = this.integer(this.get(0), 16);
+              cpu.codeWrite(m.addr, 2);
+              cpu.mem.setInt16(m.addr, v === null ? -0x8000 : v, true);
+              this.pop();
+              return;
+            }
             case 5: {                                                          // fild m64
               const lo = cpu.mem.getUint32(m.addr, true) >>> 0;
               const hi = cpu.mem.getInt32(m.addr + 4, true);
@@ -366,10 +423,16 @@ export class FPU {
               return;
             }
             case 7: {                                                          // fistp m64
-              const v = this.round(this.pop());
+              const v = this.integer(this.get(0), 64);
               cpu.codeWrite(m.addr, 8);
-              cpu.mem.setUint32(m.addr, v >>> 0, true);
-              cpu.mem.setInt32(m.addr + 4, Math.floor(v / 4294967296), true);
+              if (v === null) {
+                cpu.mem.setUint32(m.addr, 0, true);
+                cpu.mem.setInt32(m.addr + 4, -0x80000000, true);
+              } else {
+                cpu.mem.setUint32(m.addr, v >>> 0, true);
+                cpu.mem.setInt32(m.addr + 4, Math.floor(v / 4294967296), true);
+              }
+              this.pop();
               return;
             }
           }

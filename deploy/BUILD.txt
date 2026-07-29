@@ -1,0 +1,25 @@
+iXalance-js tester build
+========================
+
+Build: prod-switching-v15
+Prepared: 2026-07-29
+Entry point: index.html
+Verification: 25 checks passed, 0 failed
+
+Included original IXA containers:
+
+5c55d364740911715e6ee50fafd1f4a2a88479ed853364b857b0711cb4a0685e  data/jizz.ixa
+87b326631d4ef9f4b4ba2c93c46dd73854666b6213d1c5074cb23f9f92bd9e21  data/stash.ixa
+4f5326b36ba790bf439921e3d0a48c02e425d48bba617a541ef5be58be49b9fa  data/astral.ixa
+
+Tester focus:
+
+- Switching directly between productions during loading or playback without a page reload.
+- Chrome and Safari audio startup.
+- Stash timing at the transition from its first XM to its second XM.
+- Volume-envelope gates and sustain releases in both Stash soundtracks.
+- Note-off/instrument ordering, fractional tick carry and Bxx/Dxx/E6x priority.
+- Exact FT2 periods, retrigger/tremor state and silent forward/ping-pong cursor phase.
+- Astral download progress and end-to-end playback.
+- Silence plus a black canvas when a production exits.
+- Visual or timing differences between JIT and interpreter.

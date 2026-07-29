@@ -3,10 +3,12 @@
 // the main thread would simply look like a hung tab.
 
 import { readIxa, parseScript } from './lib/ixa.js';
-import { Machine, partmemFor } from './lib/machine.js';
+// The query is deliberate: a long-lived demo tab could otherwise construct a new worker
+// while retaining the pre-shared-herzcount machine module from its HTTP cache.
+import { Machine, MACHINE_REVISION, partmemFor } from './lib/machine.js?v=prod-switching-v15';
 import { Sequencer } from './lib/sequencer.js';
-import { CPU, Unimplemented, Fault } from './lib/cpu.js';
-import { JitCPU } from './lib/jit.js';
+import { CPU, FPU_REVISION, Unimplemented, Fault } from './lib/cpu.js';
+import { JitCPU, JIT_REVISION } from './lib/jit.js';
 
 // How long a slice should take, not how many instructions it should be. A fixed count
 // was ~90 ms once the interpreter got fast, which is both a visible pause before a stop
@@ -40,11 +42,51 @@ hop.port1.onmessage = () => { const r = onHop; onHop = null; if (r) r(); };
 const yieldToLoop = () => new Promise((r) => { onHop = r; hop.port2.postMessage(0); });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-async function boot({ url, clock, fps, engine }) {
-  log(`fetching ${url}`);
+/**
+ * Fetch an IXA as a stream so the page can show useful progress for multi-megabyte demos.
+ * Content-Length is optional (and can disappear behind compression/proxies), so retain
+ * chunks and report an indeterminate byte count when the server cannot provide a total.
+ */
+async function fetchIxa(url) {
   const res = await fetch(url);
   if (!res.ok) throw new Error(`${res.status} ${res.statusText} fetching ${url}`);
-  const bytes = new Uint8Array(await res.arrayBuffer());
+
+  const header = Number(res.headers.get('content-length'));
+  const total = Number.isFinite(header) && header > 0 ? header : 0;
+  post('download', { received: 0, total });
+
+  if (!res.body) {
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    post('download', { received: bytes.length, total: total || bytes.length, complete: true });
+    return bytes;
+  }
+
+  const reader = res.body.getReader();
+  const chunks = [];
+  let received = 0, lastReport = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    received += value.length;
+    const now = performance.now();
+    if (now - lastReport >= 50) {
+      post('download', { received, total });
+      lastReport = now;
+    }
+  }
+
+  const bytes = new Uint8Array(received);
+  let offset = 0;
+  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; }
+  post('download', { received, total: total || received, complete: true });
+  return bytes;
+}
+
+async function boot({ url, clock, fps, engine }) {
+  log(`fetching ${url}`);
+  const bytes = await fetchIxa(url);
+  log(`downloaded ${(bytes.length / 1048576).toFixed(1)} MiB`);
 
   const { demoname, entries } = readIxa(bytes);
   const script = bytes.subarray(entries[0].pos, entries[0].pos + entries[0].size);
@@ -74,8 +116,9 @@ async function boot({ url, clock, fps, engine }) {
     // it over via fardoint 'TBL1', and the script's `music` opcode copies a stored block
     // in and starts it the same way. Either way this is the page's only source of audio.
     onMusic: (xm) => {
+      const generation = machine.musicGeneration;
       const copy = xm.slice();
-      self.postMessage({ type: 'music', xm: copy.buffer }, [copy.buffer]);
+      self.postMessage({ type: 'music', xm: copy.buffer, generation }, [copy.buffer]);
     },
     onFrame: (fb, w, h) => {
       // The main thread can present at most one frame per animation frame. Do not convert
@@ -97,6 +140,7 @@ async function boot({ url, clock, fps, engine }) {
       self.postMessage({ type: 'frame', pixels: out, width: w, height: h }, [out.buffer]);
     },
   });
+  log(`runtime: machine=${MACHINE_REVISION}, fpu=${FPU_REVISION}, jit=${JIT_REVISION}`);
 
   // The JIT is the production engine. An explicit `cpu` keeps the interpreter available as
   // the oracle for comparisons, including callers older than this page.
@@ -130,22 +174,35 @@ async function boot({ url, clock, fps, engine }) {
 }
 
 async function loop() {
-  let lastReport = 0, lastCount = 0, lastMs = Date.now();
+  let lastReport = Date.now(), lastCount = 0, lastMs = lastReport;
+  // Wall throughput includes the time deliberately slept to hold CopyScreen to the
+  // requested display rate. Keep a second clock around the actual seq.step() calls so a
+  // cheap scene that finishes early reports a high active rate and a low paced rate,
+  // instead of looking like a JIT regression precisely because it has time to sleep.
+  let activeCount = 0, activeMs = 0, lastFrames = machine.frames;
   let livePart = null;                 // the block a `pop` is currently running, if any
-  // Where the demo's timeline and the wall clock were last agreed to line up. Only the
-  // virtual clock needs this: under 'wall' the demo reads real time itself and paces on
-  // its own, so throttling it here would only make it miss its own deadlines.
-  const paced = machine.clock === 'virtual';
-  let paceReal = performance.now(), paceVirtual = machine.virtualMs;
+  // Where guest presentation and real time were last agreed to line up. With the virtual
+  // clock, virtualMs is the whole demo timeline. With sound, the audio thread remains the
+  // authority on music/time, but CopyScreen still has to behave like a display flip: the
+  // original driver could not accept hundreds of flips per second. Letting it do so made
+  // Astral reach the block-3 tunnel with ~9,600 total guest flips instead of a display-rate
+  // count. Frame count is used only for wall-clock pacing; it never feeds back into mustime
+  // or herzcount.
+  const paceValue = () => machine.clock === 'virtual'
+    ? machine.virtualMs
+    : machine.frames * 1000 / machine.fps;
+  let paceReal = performance.now(), paceGuest = paceValue();
 
   while (!stopped && !seq.done) {
     if (!running) {
       await yieldToLoop();
       lastMs = Date.now(); lastCount = seq.executed;
-      paceReal = performance.now(); paceVirtual = machine.virtualMs;   // paused time is not owed
+      activeCount = 0; activeMs = 0; lastFrames = machine.frames;
+      paceReal = performance.now(); paceGuest = paceValue();          // paused time is not owed
       continue;
     }
 
+    const beforeCount = seq.executed;
     const sliceStart = performance.now();
     try {
       // One bounded unit: a slice of the running part, one WaitMusic iteration, or one
@@ -173,6 +230,8 @@ async function loop() {
     // Re-aim the next slice at SLICE_MS. Fixed instruction counts drift by an order of
     // magnitude between the intro's setup phase and its inner loops.
     const took = performance.now() - sliceStart;
+    activeCount += seq.executed - beforeCount;
+    activeMs += took;
     if (took > 0.1) {
       const want = slice * (SLICE_MS / took);
       slice = Math.max(SLICE_MIN, Math.min(SLICE_MAX, Math.round(slice * 0.75 + want * 0.25)));
@@ -183,24 +242,32 @@ async function loop() {
       // Everything reported here has to be cumulative over the whole script: each part
       // gets its own CPU and cpu.reset() zeroes its count, so counting the live CPU alone
       // would step backwards at every part boundary and show a negative rate.
-      const rate = (seq.executed - lastCount) / ((now - lastMs) / 1000);
+      const elapsed = (now - lastMs) / 1000;
+      const wallRate = (seq.executed - lastCount) / elapsed;
+      const rate = activeMs > 0 ? activeCount / (activeMs / 1000) : wallRate;
       post('stat', {
         count: seq.executed, frames: machine.frames,
-        calls: seq.trampolines + (seq.cpu?.trampolineCount ?? 0), rate,
+        calls: seq.trampolines + (seq.cpu?.trampolineCount ?? 0),
+        rate, wallRate, fps: (machine.frames - lastFrames) / elapsed,
+        block: seq.part?.block ?? null,
+        partCount: seq.cpu?.count ?? 0,
+        eip: seq.cpu?.eip ?? 0,
+        musicPos: machine.musicPos,
+        musicRow: machine.musicRow,
       });
       lastReport = now; lastCount = seq.executed; lastMs = now;
+      activeCount = 0; activeMs = 0; lastFrames = machine.frames;
     }
 
-    // The virtual clock advances a fixed step per presented frame, plus whatever the
-    // sequencer adds for a drawless slice or a WaitMusic iteration, so the demo runs at
-    // whatever rate the interpreter manages — too slow before, and too fast once it is
-    // quick enough. Hold it to real time by sleeping off whatever it is ahead.
-    // Sleeping cannot perturb the instruction stream, since no clock the demo can read
-    // moves while the worker is idle.
-    if (paced) {
-      const ahead = (machine.virtualMs - paceVirtual) - (performance.now() - paceReal);
-      if (ahead > PACE_SLACK_MS) await sleep(ahead);
-      else if (ahead < -PACE_MAX_LAG_MS) { paceReal = performance.now(); paceVirtual = machine.virtualMs; }
+    // Hold guest presentation to real time by sleeping off whatever it is ahead. Under
+    // the virtual clock this paces the whole emulated timeline. Under the wall clock it
+    // caps only screen flips; setup and drawless work still run flat out and music remains
+    // driven by the audio thread. A slow engine is never asked to repay missed frames.
+    const ahead = (paceValue() - paceGuest) - (performance.now() - paceReal);
+    if (ahead > PACE_SLACK_MS) await sleep(ahead);
+    else if (ahead < -PACE_MAX_LAG_MS) {
+      paceReal = performance.now();
+      paceGuest = paceValue();
     }
     await yieldToLoop();
   }
@@ -237,9 +304,9 @@ self.onmessage = async (ev) => {
     // normally terminates the worker straight after, which this does not depend on.
     if (machine) machine.escaped = true;
   } else if (msg.cmd === 'position') {
-    // Where the audio player actually is. Once this arrives the machine stops
-    // approximating the position from the module's tempo.
-    machine?.setMusicPosition(msg.pos, msg.row);
+    // Where the audio player actually is. A report queued by XM 1 can arrive after XM 2's
+    // synchronous TBL1 reset, so accept positions only from the currently active module.
+    machine?.setMusicPosition(msg.pos, msg.row, msg.generation);
   } else if (msg.cmd === 'frame-consumed') {
     // putImageData() has synchronously copied the pixels, so ownership can return here and
     // the same storage can be filled for the next deliverable frame.

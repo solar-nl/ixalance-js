@@ -7,4 +7,7 @@ node_modules/
 *.xm
 *.ixa
 
+# source material and video files
 /prods
+/source
+/video

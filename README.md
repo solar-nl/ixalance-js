@@ -24,6 +24,10 @@ modules, a module worker and `fetch`, none of which work from a `file://` URL.
 
 There is no build step and no dependencies.
 
+The production selector remains live during loading and playback. Choose another title and
+press **Switch and run** to replace the current worker and audio session without reloading
+the page.
+
 **Jizz spends its first ~2.5 billion instructions generating its graphics** and shows a
 decrunch bar while it does. That is the intro working as designed, not the page hanging.
 Give it a minute or two.
@@ -52,8 +56,10 @@ nothing else — not a PC emulator.
 | `lib/xm.js` | FastTracker II replayer, free of Web Audio so it also runs in Node |
 | `worker.js` | runs the CPU off the main thread, posts one backpressured RGBA frame |
 | `audio.js` | builds the AudioWorklet, relays music position back to the worker |
+| `lib/run-session.js` | atomically replaces browser worker/audio sessions |
 | `index.html` | front end: canvas, log, controls |
 | `run.mjs` | headless harness — verification, frame dumps, module dumps, WAV rendering |
+| `FT2_COMPATIBILITY_AUDIT.md` | ft2-clone comparison map, corrected quirks and retained mixer differences |
 | `data/` | the three `.IXA` files, plus reference digests |
 
 Threading matters here. The CPU runs in a **worker**, because a slice large enough
@@ -75,12 +81,8 @@ That gives two clock modes, exposed as the page's sound toggle:
 
 ## Status
 
-**Jizz and Stash play, with music.** Both are single-part 64K intros.
-
-**Astral Blur does not run yet.** It is a 20-block demo needing the script interpreter to
-drive `PushExe`/`PopPart`/`PushPicture` across 15 executable parts, three pictures and a
-stored module, with four `waitmusic` synchronisation points. Only the single-block path is
-implemented, so the dropdown entry will not get far.
+**Jizz, Stash and Astral Blur play with music.** Astral's full 20-block script drives
+executable parts, pictures, its stored module and music-position waits end to end.
 
 The browser uses the block JIT by default. Hot decoded x86 blocks become straight-line
 JavaScript while uncommon instructions fall back to the interpreter. Jizz also generates
@@ -191,13 +193,20 @@ and that changes results visibly.
 Segment registers are stored and compared but never used for addressing, since every
 selector has base 0 in the flat model these demos run under.
 
-The replayer implements what TBL's modules actually use, which was measured by walking
-their pattern and instrument data rather than guessed: linear frequency, 8-bit
-delta-coded samples with none/forward/ping-pong loops, **no instrument envelopes at all**
-(not one of the 256 instruments across the three modules enables one), a volume column
-limited to set-volume and set-panning, and effects `0 1 2 3 4 8 9 A B C D F P` with
-`E1 E2 E6 E8 E9 EA EB EC ED EE`. It reports anything it skipped rather than approximating
-it; on these three modules that list is empty.
+The replayer follows ft2-clone's FT2 replay routines for tick scheduling, note/instrument
+ordering, effect memory, normal and extended effects, volume-column effects, pattern
+control, envelopes, fadeout and instrument auto-vibrato. It uses the bit-exact linear and
+Amiga period tables, FT2's quantized voice delta, square-root panning, stereo downmixing,
+ModPlug ADPCM and 8-/16-bit samples with disabled, forward and ping-pong loops. The
+bundled modules exercise several non-obvious cases: Stash uses tracker speeds 24 and 12,
+Astral uses panning envelopes, and FT2's `E8x` command is a no-op rather than set-panning.
+
+Envelope interpolation uses FT2's signed 8.8 slope, loop endpoints wrap on the endpoint
+tick itself, and a held sustain point is rewound on key-off so its release begins on the
+same tick as FT2. The short gate on Stash XM 2 instrument 25 therefore repeats every six
+tracker ticks rather than the seven-tick cycle produced by the earlier implementation.
+The detailed code-to-code comparison, fixed quirks and deliberately retained output-format
+differences are recorded in [FT2_COMPATIBILITY_AUDIT.md](FT2_COMPATIBILITY_AUDIT.md).
 
 No MMX or SSE is implemented. None is needed: across 4.8 MB of demo code there is not one
 MMX register load. The Pentium requirement in Stash's docs is asking for FPU throughput,
@@ -222,6 +231,10 @@ Jizz and Stash do not ship music: they *generate* an XM at runtime and hand it t
 — 940,876 and 899,710 bytes respectively, which is Probe's "950Kb of music into 20K" from
 `JIZZ.DOC` showing up exactly as advertised.
 
+Stash performs that handoff twice. Each module starts with an immediate order/row reset,
+and browser audio reports are tagged with a module generation so a queued report from the
+first XM cannot leak its terminal tracker position into the second XM.
+
 ## Licensing
 
 Read this before publishing anything built from it.
@@ -238,6 +251,10 @@ for money — no; press on CD — yes; sell it — no; "modify one single bit" �
 the `.IXA` files unmodified for non-commercial use is within that. Redistributing them
 modified, or commercially, is not.
 
+**XM replay behavior is based on ft2-clone**, copyright 2016–2026 Olav Sørensen and
+licensed under the BSD 3-Clause License. Its original license is retained in
+`source/ft2-clone-master/LICENSE`.
+
 ## Credits
 
 * **The Black Lotus** — Jizz, Stash, Astral Blur, and iXalance itself. Code by Nix, Jace
@@ -246,6 +263,8 @@ modified, or commercially, is not.
   the format and ABI knowable at all. Still online at
   <https://www.libsdl.org/projects/ixalance/>.
 * **Adam Seychell** — DOS/32A, the extender these binaries target.
+* **Olav Sørensen** — ft2-clone, the executable FT2 replay reference used to complete the
+  XM player and preserve the original tracker's quirks.
 
 Format archeology, the original extraction tooling and the provenance work live in the
 [demoscene-archeology](../demoscene-archeology/tbl) repository.

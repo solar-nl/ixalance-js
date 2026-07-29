@@ -16,11 +16,15 @@ class XmProcessor extends AudioWorkletProcessor {
     super();
     this.player = null;
     this.sinceReport = 0;
+    this.generation = 0;
     this.port.onmessage = (ev) => {
       if (ev.data.cmd === 'load') {
+        this.generation = ev.data.generation;
+        this.sinceReport = 0;
         this.player = new XmPlayer(new Uint8Array(ev.data.xm), sampleRate);
         this.port.postMessage({
           type: 'ready',
+          generation: this.generation,
           title: this.player.title,
           channels: this.player.channels,
           bpm: this.player.defaultBpm,
@@ -29,7 +33,10 @@ class XmProcessor extends AudioWorkletProcessor {
           unsupported: [...this.player.unsupported],
         });
       } else if (ev.data.cmd === 'stop') {
+        this.generation = ev.data.generation;
+        this.sinceReport = 0;
         this.player = null;
+        this.port.postMessage({ type: 'stopped', generation: this.generation });
       }
     };
   }
@@ -50,6 +57,7 @@ class XmProcessor extends AudioWorkletProcessor {
       this.sinceReport = 0;
       this.port.postMessage({
         type: 'position',
+        generation: this.generation,
         pos: this.player.position,
         row: this.player.row,
         loops: this.player.loops,
@@ -68,6 +76,7 @@ export class XmAudio {
     this.ctx = null;
     this.node = null;
     this.initPromise = null;
+    this.generation = 0;
   }
 
   /**
@@ -100,7 +109,9 @@ export class XmAudio {
     // the transition to running once an output node has been connected.
     const resumed = ctx.state === 'suspended' ? ctx.resume() : Promise.resolve();
 
-    const res = await fetch('./lib/xm.js');
+    // Version the worklet source explicitly: it is fetched as text and therefore is not
+    // part of either the page's or worker's ES-module graph.
+    const res = await fetch('./lib/xm.js?v=prod-switching-v15');
     if (!res.ok) throw new Error(`cannot read lib/xm.js (${res.status})`);
     // Strip the ES export keyword; worklet globals are plain script scope.
     const source = (await res.text()).replace(/^export\s+/gm, '');
@@ -116,6 +127,10 @@ export class XmAudio {
     if (this.ctx !== ctx) throw new Error('audio initialization was cancelled');
     this.node = new AudioWorkletNode(ctx, 'xm-player', { outputChannelCount: [2] });
     this.node.port.onmessage = ({ data }) => {
+      // A TBL1 handoff can race a position report already queued by the previous player.
+      // Module generations make that old report harmless instead of letting XM 1's final
+      // order overwrite XM 2's freshly reset 0:0 position.
+      if (data.generation !== this.generation) return;
       if (data.type === 'position') this.onPosition(data);
       else if (data.type === 'ready') {
         this.onLog(`audio: ${data.channels} channels, ${data.orders} orders, `
@@ -124,7 +139,7 @@ export class XmAudio {
         if (data.unsupported.length) {
           this.onLog(`audio: ignoring unsupported ${data.unsupported.join(', ')}`, 'warn');
         }
-      }
+      } else if (data.type === 'stopped') this.onLog('audio: stopped');
     };
     this.node.onprocessorerror = () => {
       this.onLog('audio worklet processor stopped unexpectedly', 'err');
@@ -138,16 +153,22 @@ export class XmAudio {
   }
 
   /** Hand a generated XM module to the player. */
-  async play(bytes) {
+  async play(bytes, generation = this.generation + 1) {
+    this.generation = generation;
     await this.init();
     if (this.ctx.state !== 'running') await this.resume();
+    if (generation !== this.generation) return; // superseded while init/resume was pending
     // Copy, because the buffer is transferred away.
     const copy = bytes.slice();
-    this.node.port.postMessage({ cmd: 'load', xm: copy.buffer }, [copy.buffer]);
+    this.node.port.postMessage(
+      { cmd: 'load', xm: copy.buffer, generation },
+      [copy.buffer],
+    );
   }
 
   stop() {
-    if (this.node) this.node.port.postMessage({ cmd: 'stop' });
+    const generation = ++this.generation;
+    if (this.node) this.node.port.postMessage({ cmd: 'stop', generation });
   }
 
   async suspend() { if (this.ctx && this.ctx.state === 'running') await this.ctx.suspend(); }

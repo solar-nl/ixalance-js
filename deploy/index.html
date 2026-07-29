@@ -1,4 +1,4 @@
-<title>iXalance for the web</title>
+<title>iXalance-js</title>
 <style>
   :root { color-scheme: dark; }
   * { box-sizing: border-box; }
@@ -13,7 +13,7 @@
   }
   canvas {
     image-rendering: pixelated; background: #000; border: 1px solid #23282f;
-    width: min(92vw, 960px); height: auto; aspect-ratio: 8 / 5; display: block;
+    width: min(92vw, 960px); height: auto; aspect-ratio: 4 / 3; display: block;
   }
   .row { display: flex; gap: .5rem; flex-wrap: wrap; justify-content: center; align-items: center; }
   button, select, label {
@@ -25,6 +25,13 @@
   button:disabled { opacity: .45; cursor: default; }
   label { display: flex; gap: .4rem; align-items: center; cursor: pointer; }
   #stat { color: #3d99d8; min-height: 1.5em; }
+  #download {
+    width: min(92vw, 560px); display: flex; align-items: center; gap: .75rem;
+    color: #8b97a3; font-size: 12px;
+  }
+  #download[hidden] { display: none; }
+  #download progress { flex: 1; min-width: 8rem; accent-color: #3d99d8; }
+  #download-text { min-width: 13rem; text-align: right; }
   #log {
     width: min(92vw, 960px); max-height: 12rem; overflow-y: auto; background: #0e1216;
     border: 1px solid #23282f; padding: .6rem .8rem; white-space: pre-wrap;
@@ -43,39 +50,39 @@
   <select id="prod">
     <option value="./data/jizz.ixa">Jizz &mdash; 64K intro, Wired 1997</option>
     <option value="./data/stash.ixa">Stash &mdash; 64K intro, The Party 1997</option>
+    <option value="./data/astral.ixa">Astral Blur &mdash; demo, The Gathering 1997</option>
   </select>
   <button id="start">Load and run</button>
   <button id="pause" disabled>Pause</button>
   <label><input type="checkbox" id="sound" checked> sound</label>
-  <!-- The profiled block JIT is the production engine. Untick it to compare the reference
-       interpreter; full order sweeps require matching architectural fingerprints. -->
   <label><input type="checkbox" id="jit" checked> JIT</label>
+</div>
+
+<div id="download" hidden>
+  <progress id="download-progress"></progress>
+  <span id="download-text">Preparing download…</span>
 </div>
 
 <div id="stat">idle</div>
 
 <p class="note">
-  The original 1997 DOS binary runs here as x86 and x87 code. Hot blocks are translated to
-  JavaScript while uncommon instructions fall back to the reference interpreter. A 64K
-  intro generates its graphics before drawing, so Jizz initially shows a decrunch bar
-  &mdash; that is the intro working, not the page hanging. The intro also generates its own
-  music, which starts when decrunching finishes.
+  Select one of the original TBL productions from the dropdown and press &ldquo;Load and run&rdquo;.
+  Choose another and press &ldquo;Switch and run&rdquo; at any time; no page reload is needed.
+  <br/>Note that both Jizz and Stash have to run their original precalc.
 </p>
 <p class="note">
-  With sound on, the demo follows the music, exactly as it did under the original loader
-  &mdash; so where execution cannot keep up, the visuals skip rather than the audio
-  stalling. Turn sound off for a smooth but silent run.
+  This javascript version of iXalance is based on the <a href="http://www.s2.org/iXalance/">Linux version</a> by Jarno Paananen.<br/>   The xm-replayer is based on <a href="https://github.com/8bitbubsy/ft2-clone">the work</a> by Olav S&oslash;rensen. <br/>
+  Shout out to the Dutch Demoscene discord for testing earlier versions and providing snark and feedback.
 </p>
 <p class="note">
-  This build includes XM-order-guided JIT optimizations validated over 21.27 billion Jizz
-  instructions. Sound initialization is compatible with Chrome and Safari; start it using
-  the button so the browser can authorize the AudioWorklet.
+  This was a fun few evenings pushing the latest AI coding models through their paces. <br/> Happy to see these prods as code again, not as captures. &mdash; <a href="https://demozoo.org/sceners/11723"/>Coat / Solar</a>
 </p>
 
 <div id="log"></div>
 
 <script type="module">
-import { XmAudio } from './audio.js';
+import { XmAudio } from './audio.js?v=prod-switching-v15';
+import { RunSessionManager } from './lib/run-session.js?v=prod-switching-v15';
 
 const canvas = document.getElementById('screen');
 const ctx = canvas.getContext('2d', { alpha: false });
@@ -86,15 +93,39 @@ const pauseBtn = document.getElementById('pause');
 const prodSel = document.getElementById('prod');
 const soundBox = document.getElementById('sound');
 const jitBox = document.getElementById('jit');
-// ?engine=cpu / ?engine=jit override the default, so a comparison run is a URL not a click.
-const wantEngine = new URLSearchParams(location.search).get('engine');
-if (wantEngine === 'jit') jitBox.checked = true;
-else if (wantEngine === 'cpu') jitBox.checked = false;
+const downloadEl = document.getElementById('download');
+const downloadProgress = document.getElementById('download-progress');
+const downloadText = document.getElementById('download-text');
+const BROWSER_BUILD = 'prod-switching-v15';
+const RUNTIME_MODULES = [
+  './audio.js',
+  './worker.js',
+  './lib/ixa.js',
+  './lib/d32.js',
+  './lib/machine.js',
+  './lib/sequencer.js',
+  './lib/fpu.js',
+  './lib/cpu.js',
+  './lib/jit.js',
+  './lib/xm.js',
+  './lib/run-session.js',
+];
+// Keep the interpreter available as the reference engine for comparison runs.
+if (new URLSearchParams(location.search).get('engine') === 'cpu') jitBox.checked = false;
 
-let worker = null;
-let audio = null;
 let pending = null;
 let raf = 0;
+const sessions = new RunSessionManager({
+  onDeactivate: () => {
+    cancelAnimationFrame(raf);
+    raf = 0;
+    hideDownload();
+    clearScreen();
+    updateRunControls();
+  },
+});
+
+const mib = (bytes) => `${(bytes / 1048576).toFixed(1)} MiB`;
 
 function log(text, cls) {
   const line = document.createElement('div');
@@ -104,25 +135,57 @@ function log(text, cls) {
   logEl.scrollTop = logEl.scrollHeight;
 }
 
+function hideDownload() {
+  downloadEl.hidden = true;
+  downloadProgress.removeAttribute('value');
+  downloadProgress.max = 1;
+}
+
+function clearScreen() {
+  pending = null;
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+}
+
+function isActive(run) {
+  return sessions.isActive(run);
+}
+
+function updateRunControls() {
+  startBtn.disabled = false;
+  startBtn.textContent = sessions.current ? 'Switch and run' : 'Load and run';
+  if (!sessions.current) {
+    pauseBtn.disabled = true;
+    pauseBtn.textContent = 'Pause';
+  }
+}
+
+function stopRun(run) {
+  sessions.stop(run);
+}
+
 // Draw at most one frame per animation frame, always the most recent one.
 function draw() {
   raf = requestAnimationFrame(draw);
   if (!pending) return;
-  const { pixels, width, height } = pending;
+  const { run, pixels, width, height } = pending;
   pending = null;
+  if (!isActive(run)) return;
   if (canvas.width !== width || canvas.height !== height) {
     canvas.width = width;
     canvas.height = height;
-    // The stylesheet's 8/5 is only the pre-first-frame default. A demo changes resolution
-    // per part — Astral Blur's picture blits are 4:3 — and without following it here the
-    // pictures would be stretched to the 320x200 shape of the parts around them.
-    canvas.style.aspectRatio = `${width} / ${height}`;
+    // 320x200 VGA pixels are 1.2 times taller than they are wide: the 64,000 framebuffer
+    // samples are presented as 4:3, not the raw 8:5 memory ratio. Higher-resolution
+    // picture modes carry their square-pixel aspect directly.
+    canvas.style.aspectRatio = width === 320 && height === 200
+      ? '4 / 3'
+      : `${width} / ${height}`;
   }
   ctx.putImageData(new ImageData(pixels, width, height), 0, 0);
   // The worker permits one frame in flight. putImageData() has copied it synchronously,
   // so transfer the storage back for reuse and let the next deliverable frame through.
-  if (worker) {
-    worker.postMessage(
+  if (run.worker) {
+    run.worker.postMessage(
       { cmd: 'frame-consumed', buffer: pixels.buffer },
       [pixels.buffer],
     );
@@ -130,106 +193,171 @@ function draw() {
 }
 
 function teardown() {
-  if (worker) {
-    worker.postMessage({ cmd: 'stop' });
-    worker.terminate();
-    worker = null;
-  }
-  if (audio) { audio.close(); audio = null; }
+  stopRun(sessions.current);
   cancelAnimationFrame(raf);
   raf = 0;
-  pending = null;
+  hideDownload();
+  clearScreen();
+}
+
+async function refreshRuntimeModules(signal) {
+  await Promise.all(RUNTIME_MODULES.map(async (url) => {
+    const response = await fetch(url, { cache: 'reload', signal });
+    if (!response.ok) throw new Error(`${response.status} refreshing ${url}`);
+  }));
 }
 
 startBtn.onclick = async () => {
-  teardown();
+  const run = sessions.begin({
+    url: prodSel.value,
+    engine: jitBox.checked ? 'jit' : 'cpu',
+  });
+  updateRunControls();
   logEl.textContent = '';
   statEl.textContent = 'starting';
-  startBtn.disabled = true;
+  downloadEl.hidden = false;
+  downloadProgress.removeAttribute('value');
+  downloadText.textContent = 'Preparing runtime…';
 
-  let soundReady = soundBox.checked;
-  if (soundReady) {
+  if (soundBox.checked) {
     // init() must be invoked before this click handler's first await. Safari will not
     // start AudioWorklet rendering if we wait until the demo generates music much later.
-    audio = new XmAudio({
-      onLog: (text, cls) => log(text, cls),
-      onPosition: ({ pos, row }) => worker?.postMessage({ cmd: 'position', pos, row }),
+    run.audio = new XmAudio({
+      onLog: (text, cls) => { if (isActive(run)) log(text, cls); },
+      onPosition: ({ pos, row, generation }) =>
+        run.worker?.postMessage({ cmd: 'position', pos, row, generation }),
     });
     try {
-      await audio.init();
+      await run.audio.init();
     } catch (e) {
+      if (!isActive(run)) return;
       log(`audio failed to initialize: ${e.message ?? e}`, 'err');
-      audio?.close();
-      audio = null;
-      soundReady = false;
+      run.audio?.close();
+      run.audio = null;
       log('continuing with the virtual clock and no sound', 'warn');
     }
   }
 
-  worker = new Worker('./worker.js', { type: 'module' });
+  if (!isActive(run)) return;
+  try {
+    // A worker has its own module map, but its fetches still use the browser HTTP cache.
+    // Refresh every emulator source first so timer, interpreter and JIT revisions cannot
+    // be mixed across starts in a long-lived development tab.
+    await refreshRuntimeModules(run.abort.signal);
+    if (!isActive(run)) return;
+    log(`runtime ${BROWSER_BUILD}: module cache refreshed`);
+  } catch (e) {
+    if (!isActive(run) || e?.name === 'AbortError') return;
+    log(`runtime refresh failed: ${e.message ?? e}`, 'err');
+    statEl.textContent = 'stopped — runtime refresh failed';
+    stopRun(run);
+    return;
+  }
 
-  worker.onerror = (e) => {
+  if (!isActive(run)) return;
+  // Force a fresh worker module graph after emulator changes instead of trusting the
+  // resource cache of a tab that may have been open throughout development.
+  try {
+    run.worker = new Worker(`./worker.js?v=${BROWSER_BUILD}`, { type: 'module' });
+  } catch (e) {
+    log(`worker failed to start: ${e.message ?? e}`, 'err');
+    statEl.textContent = 'stopped — worker failed to start';
+    stopRun(run);
+    return;
+  }
+
+  run.worker.onerror = (e) => {
+    if (!isActive(run)) return;
     log(`worker failed to start: ${e.message || e}`, 'err');
     log('this page must be served over HTTP — opening the file directly will not work',
         'warn');
-    startBtn.disabled = false;
+    statEl.textContent = 'stopped — worker failed to start';
+    stopRun(run);
   };
 
-  worker.onmessage = ({ data }) => {
+  run.worker.onmessage = ({ data }) => {
+    if (!isActive(run)) return;
     switch (data.type) {
       case 'log':
         log(data.text, data.cls);
         break;
       case 'frame':
-        pending = data;
+        pending = { run, ...data };
         break;
+      case 'download': {
+        downloadEl.hidden = false;
+        if (data.total > 0) {
+          downloadProgress.max = data.total;
+          downloadProgress.value = Math.min(data.received, data.total);
+          const percent = Math.min(100, data.received / data.total * 100);
+          downloadText.textContent =
+            `Downloading ${mib(data.received)} / ${mib(data.total)} (${percent.toFixed(0)}%)`;
+        } else {
+          downloadProgress.removeAttribute('value');
+          downloadText.textContent = `Downloading ${mib(data.received)}`;
+        }
+        break;
+      }
       case 'music':
-        if (!audio) { log('music generated, but sound is off', 'warn'); break; }
+        if (!run.audio) { log('music generated, but sound is off', 'warn'); break; }
         log(`music: ${data.xm.byteLength.toLocaleString()} bytes handed over by the demo`);
-        audio.play(new Uint8Array(data.xm)).catch((e) => {
+        run.audio.play(new Uint8Array(data.xm), data.generation).catch((e) => {
+          if (!isActive(run)) return;
           log(`audio failed: ${e.message ?? e}`, 'err');
-          audio?.close();
-          audio = null;
+          run.audio?.close();
+          run.audio = null;
         });
         break;
       case 'stat':
         statEl.textContent =
           `${(data.count / 1e6).toFixed(1)}M instructions · `
-          + `${(data.rate / 1e6).toFixed(1)}M/s · ${data.frames} frames · `
-          + `${data.calls} host calls`;
+          + `${(data.rate / 1e6).toFixed(1)}M/s active · `
+          + `${(data.wallRate / 1e6).toFixed(1)}M/s paced · `
+          + `${data.fps.toFixed(1)} fps · ${data.frames} frames · `
+          + `${data.calls} host calls`
+          + (data.block == null
+            ? ''
+            : ` · exe block ${data.block} @ ${(data.eip >>> 0).toString(16)}`)
+          + ` · music ${data.musicPos}:${data.musicRow}`;
         break;
       case 'started':
+        hideDownload();
         pauseBtn.disabled = false;
         pauseBtn.textContent = 'Pause';
         if (!raf) raf = requestAnimationFrame(draw);
         break;
       case 'stopped':
-        pauseBtn.disabled = true;
-        startBtn.disabled = false;
+        // A module is loopable by design, but it belongs to the production. Once the
+        // script exits, silence it before its terminal Bxx/restart can be heard.
+        stopRun(run);
         statEl.textContent = `stopped — ${data.reason}`;
         break;
     }
   };
 
-  worker.postMessage({
+  run.worker.postMessage({
     cmd: 'start',
-    url: prodSel.value,
-    // With sound the audio thread is the authority on time, so use the real clock. With
-    // sound off, the virtual clock ties the timeline to presented frames instead, which
-    // keeps a slow interpreter from skipping.
-    clock: soundReady ? 'wall' : 'virtual',
+    url: run.url,
+    // Audio position and the loader's 70 Hz animation counter are separate clocks. The
+    // worklet reports the real XM position through `position` messages, while the virtual
+    // display clock drives herzcount. Using wall time for both lets multiple guest flips
+    // inside one synchronous CPU slice observe a zero tick delta; Astral's block-3 tunnel
+    // turns that into an enormous counter loop and appears frozen after its first frame.
+    clock: 'virtual',
     fps: 50,
-    // The worker only accepts the exact string 'jit'; anything else runs the interpreter.
-    engine: jitBox.checked ? 'jit' : 'cpu',
+    // The interpreter remains selectable as the reference engine.
+    engine: run.engine,
   });
 };
 
 pauseBtn.onclick = () => {
-  if (!worker) return;
+  const run = sessions.current;
+  if (!run?.worker) return;
   const paused = pauseBtn.textContent === 'Resume';
-  worker.postMessage({ cmd: paused ? 'resume' : 'pause' });
-  if (audio) {
-    (paused ? audio.resume() : audio.suspend()).catch((e) => {
+  run.worker.postMessage({ cmd: paused ? 'resume' : 'pause' });
+  if (run.audio) {
+    (paused ? run.audio.resume() : run.audio.suspend()).catch((e) => {
+      if (!isActive(run)) return;
       log(`audio ${paused ? 'resume' : 'suspend'} failed: ${e.message ?? e}`, 'err');
     });
   }

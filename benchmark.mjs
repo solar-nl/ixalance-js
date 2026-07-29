@@ -21,9 +21,12 @@ import { CPU } from './lib/cpu.js';
 import { JitCPU } from './lib/jit.js';
 import { XmPlayer } from './lib/xm.js';
 
-const FORMAT = 1;
-const ORDER_FORMAT = 1;
-const ROW_FORMAT = 1;
+// Version 3 records states produced with FT2's fractional tick carry and shared
+// Bxx/Dxx/E6x control flags. Earlier music/order/row boundaries are not valid starting
+// points even when the IXA bytes themselves have not changed.
+const FORMAT = 3;
+const ORDER_FORMAT = 3;
+const ROW_FORMAT = 3;
 const SAMPLE_RATE = 48_000;
 const MUSIC_READY = Symbol('music-ready');
 const NEXT_MUSIC_READY = Symbol('next-music-ready');
@@ -158,7 +161,7 @@ function parseNumberSpec(spec, option) {
 function checkpointPath(ixaPath, hash, requested) {
   if (requested) return resolve(requested);
   const stem = basename(ixaPath, extname(ixaPath)).toLowerCase();
-  return resolve('out', 'bench', `${stem}-${hash.slice(0, 12)}.music-start.cp.gz`);
+  return resolve('out', 'bench', `${stem}-${hash.slice(0, 12)}.v${FORMAT}.music-start.cp.gz`);
 }
 
 function musicCheckpointPath(firstMusicFile, musicIndex) {
