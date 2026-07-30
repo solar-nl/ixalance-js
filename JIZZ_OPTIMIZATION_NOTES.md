@@ -25,6 +25,8 @@ The final one-run sweep covered 21,270,723,531 instructions:
 - Fast controls: orders 0, 8 and 12
 - Browser-sensitive rasterizer controls: orders 1 and 2
 
+The sweep is retained as [`results/jizz-orders.csv`](results/jizz-orders.csv).
+
 The retained order-guided changes are deliberately narrow:
 
 - `FXCH ST(i)` is emitted directly.
@@ -125,4 +127,3 @@ For each candidate:
 
 Never use an `IXA_JIT_STATS=1` run as the performance number; the counters are intentionally
 off in production because collecting them changes the hot path.
-

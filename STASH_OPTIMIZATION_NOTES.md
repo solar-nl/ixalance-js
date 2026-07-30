@@ -102,8 +102,8 @@ full sweep and to 54.4 MIPS in a focused three-repeat run.
 
 The original CSVs are preserved as:
 
-- `out/bench/stash-xm1-rows-before-span.csv`
-- `out/bench/stash-xm2-rows-before-span.csv`
+- `results/stash-xm1-rows-before-span.csv`
+- `results/stash-xm2-rows-before-span.csv`
 
 ## Direct decoded-block reuse
 
@@ -137,14 +137,19 @@ Direct reuse adds 22.8% to XM 1 and 10.7% to XM 2. Cumulative gains over the ori
 are 79.1% and 58.9%. XM 1 order 6 rows 0–32 rose again from 86–87 to 145–148 MIPS. XM 2's
 full-sweep windows all improved by 6.6–19.9%.
 
+The final sweeps are retained as:
+
+- [`results/stash-xm1-rows.csv`](results/stash-xm1-rows.csv)
+- [`results/stash-xm2-rows.csv`](results/stash-xm2-rows.csv)
+
 XM 1 order 0 rows 32–48 recorded one low 189.5-MIPS sample during the long sweep. It does
 not reproduce: a saved three-repeat focused run measures 302.7 MIPS, versus 254.5 before
-direct reuse. Use `out/bench/stash-xm1-order0-row32-direct-repeat3.csv` for that control.
+direct reuse. Use `results/stash-xm1-order0-row32-direct-repeat3.csv` for that control.
 
 The span-only CSVs are preserved as:
 
-- `out/bench/stash-xm1-rows-before-direct.csv`
-- `out/bench/stash-xm2-rows-before-direct.csv`
+- `results/stash-xm1-rows-before-direct.csv`
+- `results/stash-xm2-rows-before-direct.csv`
 
 ### Rejected 128-byte span
 

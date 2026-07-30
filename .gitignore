@@ -7,7 +7,23 @@ node_modules/
 *.xm
 *.ixa
 
-# source material and video files
-/prods
-/source
-/video
+# Guest build intermediates. The sources and build scripts are tracked; the
+# object files, linked images and frame dumps they produce are not.
+*.o
+*.a
+*.elf
+*.exe
+/sdk/*/build/
+/sdk/*/lib/
+/sdk/*/frames/
+/sdk/*/ports/*/build/
+/sdk/*/ports/*/frames/
+
+# Generated release tree and rendered screenshots. Both remain available locally.
+/deploy/
+/screenshots/
+
+# Upstream/research material and copyrighted reference assets.
+/prods/
+/source/
+/video/

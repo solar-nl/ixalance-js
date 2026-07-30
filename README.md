@@ -7,22 +7,22 @@ running after DOS. It did not rewrite them: it read the original protected-mode 
 out of an `.IXA` file, relocated it, and jumped in. This project does the same thing in
 JavaScript, executing the 1997 binaries instruction by instruction.
 
-![Jizz, ribbons](screenshots/jizz-ribbons.png)
-![Jizz, tunnel](screenshots/jizz-tunnel.png)
-![Jizz, logo](screenshots/jizz-logo.png)
-
-Those frames came out of the interpreter, not a video capture.
+This public repository contains the runtime, tests and performance research. The original
+TBL demo binaries and rendered artwork are obtained separately and are not covered by the
+software license.
 
 ## Running it
 
 ```
+npm run data       # download and verify the three original IXA containers
 npm run serve      # or: python3 -m http.server 8731 --bind 127.0.0.1
 ```
 
 Then open <http://127.0.0.1:8731/>. It has to be served over HTTP — the page uses ES
 modules, a module worker and `fetch`, none of which work from a `file://` URL.
 
-There is no build step and no dependencies.
+There is no build step and there are no package dependencies. `npm run data` downloads the
+unmodified demos from the official iXalance archive; it does not install JavaScript code.
 
 The production selector remains live during loading and playback. Choose another title and
 press **Switch and run** to replace the current worker and audio session without reloading
@@ -53,14 +53,20 @@ nothing else — not a PC emulator.
 | `lib/cpu.js` | 386 integer interpreter |
 | `lib/jit.js` | hot-block JavaScript compiler, with the interpreter as fallback and oracle |
 | `lib/fpu.js` | x87 core |
+| `lib/memory-trace.js` | opt-in guest-data view shared by interpreter, x87 and JIT instrumentation |
+| `lib/provenance.js` | clustered buffer dependencies, observed access maps and mesh-layout evidence |
+| `lib/pandora.js` / `lib/debug-capture.js` | recovered texture profiles, event-driven stages and browser snapshots |
 | `lib/xm.js` | FastTracker II replayer, free of Web Audio so it also runs in Node |
 | `worker.js` | runs the CPU off the main thread, posts one backpressured RGBA frame |
 | `audio.js` | builds the AudioWorklet, relays music position back to the worker |
 | `lib/run-session.js` | atomically replaces browser worker/audio sessions |
 | `index.html` | front end: canvas, log, controls |
 | `run.mjs` | headless harness — verification, frame dumps, module dumps, WAV rendering |
+| `sdk/` | iXalance guest SDK, packaging tools, historical phase-0 probe, and source ports |
 | `FT2_COMPATIBILITY_AUDIT.md` | ft2-clone comparison map, corrected quirks and retained mixer differences |
-| `data/` | the three `.IXA` files, plus reference digests |
+| `results/` | retained benchmark CSVs supporting the optimization notes |
+| `data/` | setup instructions and reference digests; downloaded `.IXA` files stay untracked |
+| `LICENSING.md` | license boundaries, third-party notices and asset provenance |
 
 Threading matters here. The CPU runs in a **worker**, because a slice large enough
 to make progress blocks for hundreds of milliseconds and would read as a hung tab. The XM
@@ -93,9 +99,31 @@ machine, a 1.5-billion-instruction Jizz run sustains roughly 130 million instruc
 second versus 48 million in the interpreter; browser and hardware results vary. Uncheck
 **JIT**, use `?engine=cpu`, or set `IXA_ENGINE=cpu` in Node to run the reference engine.
 
-**Pixel accuracy is unverified.** The output is coherent and clearly right in character,
-but nothing has been diffed against a reference capture, so an x87 rounding difference or
-a mis-set flag would not have been caught.
+Astral frames have been spot-checked against a reference capture, and interpreter/JIT
+boundaries are compared throughout the regression suite. Pixel accuracy is not yet
+exhaustively proven for every scene.
+
+### Pandora browser view
+
+Enable **Pandora textures + samples** before starting a production. The default follows
+the original Jizz `/pandora` idea: Jizz and Stash expose their recovered generated texture
+slots, and every module handed to the host gets a sample summary and audition controls.
+Sample auditioning follows the module's ordered pattern data: each physical sample is
+played at its most frequently triggered note after applying the instrument keymap,
+relative note and finetune. The containing XI instrument is rendered by the FT2-compatible
+replayer, including forward/ping-pong loops, volume and panning envelopes, auto-vibrato,
+and a real note-off/fadeout release. Samples unused by the written song order fall back
+to C-4. Stash's two generated soundtracks are inspected independently; its second TBL1
+handoff replaces the first instrument list and stops any audition from the old module.
+Hidden scratch textures are captured at their recovered exact instruction boundary; the
+remaining slots freeze at the first generated-XM handoff. This mode does not wrap or trace
+guest memory.
+
+The unfinished LUT and software-3D analysis is retained behind the explicit
+`?provenance=1` URL feature flag. With that flag, texture writes produce intermediate
+epochs and source-address maps, while sampled framebuffer flips can show access-backed
+geometry candidates. This experimental mode is deliberately not part of the normal
+Pandora UI and is substantially slower.
 
 ### Verifying
 
@@ -103,9 +131,10 @@ a mis-set flag would not have been caught.
 npm run verify
 ```
 
-Unpacks every block of all three bundled modules and compares against known-good digests
+Unpacks every block of all three downloaded modules and compares against known-good digests
 in `data/reference.json`. Those came from `unixa.py` in the
-[demoscene-archeology](../demoscene-archeology/tbl) repository, where the format was
+[demoscene-archeology](https://github.com/Jasper2-0/demoscene-archeology/tree/main/tbl)
+repository, where the format was
 reverse-engineered and documented; its correctness rests on the container being
 self-verifying — blocks are contiguous and end exactly at EOF, the LZSS output length
 matches the length the RLE stage declares, and the RLE output matches the directory's
@@ -118,10 +147,20 @@ node run.mjs run data/jizz.ixa                          # execute, report where 
 node run.mjs run data/jizz.ixa 1 20000000000 out/frames # dump frames as PNG
 node run.mjs dumpxm data/jizz.ixa out/jizz.xm           # capture the generated module
 node run.mjs renderxm out/jizz.xm out/jizz.wav 30       # render audio to WAV
+npm run pandora:jizz                                    # export Jizz's generated textures
+npm run pandora:stash                                   # do the same for Stash
 ```
 
 `IXA_FRAME_FROM`, `IXA_FRAME_EVERY`, `IXA_CLOCK` and `IXA_ENGINE` tune frame dumping,
 clock source and CPU engine. Jizz reaches its first real effect around frame 1200.
+
+The Pandora commands are a modern equivalent of Jizz's hidden `/pandora` switch. They run
+only the precalculation, observe the intros' live procedural-texture slots without changing
+emulated memory, and stop at the first generated-XM handoff. The result is a set of
+top-origin, 24-bit TGA files plus a capture manifest under `out/pandora/`. Jizz uses its
+original dump names; Stash uses the source labels recovered from its texture programs,
+with neutral slot names for two unlabeled maps. Stash's final `SLOT15.TGA` is the native
+320×200 generated image; the other dumps are 256×256.
 
 ### Benchmarking by XM phase
 
@@ -168,6 +207,7 @@ The measured Jizz follow-up backlog and the Chrome/Safari regression from broad 
 inlining are recorded in [JIZZ_OPTIMIZATION_NOTES.md](JIZZ_OPTIMIZATION_NOTES.md).
 Stash's two-XM row-window measurements and generated-code cache work are recorded in
 [STASH_OPTIMIZATION_NOTES.md](STASH_OPTIMIZATION_NOTES.md).
+The retained CSVs referenced by those notes are under [results/](results/).
 
 The real XM replayer supplies order/row timing, including tempo changes, pattern breaks,
 jumps and loops, but skips sample mixing because browser audio runs on a separate thread.
@@ -198,7 +238,7 @@ ordering, effect memory, normal and extended effects, volume-column effects, pat
 control, envelopes, fadeout and instrument auto-vibrato. It uses the bit-exact linear and
 Amiga period tables, FT2's quantized voice delta, square-root panning, stereo downmixing,
 ModPlug ADPCM and 8-/16-bit samples with disabled, forward and ping-pong loops. The
-bundled modules exercise several non-obvious cases: Stash uses tracker speeds 24 and 12,
+downloaded modules exercise several non-obvious cases: Stash uses tracker speeds 24 and 12,
 Astral uses panning envelopes, and FT2's `E8x` command is a no-op rather than set-panning.
 
 Envelope interpolation uses FT2's signed 8.8 slope, loop endpoints wrap on the endpoint
@@ -214,18 +254,15 @@ not new instructions.
 
 ## The data
 
-`data/` holds the three `.IXA` files from
-`files.scene.org/demos/groups/tbl/pc/`, unmodified.
+The repository does not redistribute the `.IXA` files. `npm run data` downloads the
+unmodified containers from the
+[official iXalance archive](https://www.libsdl.org/projects/ixalance/) and verifies:
 
 | File | SHA-256 |
 |------|---------|
 | `jizz.ixa` | `5c55d364740911715e6ee50fafd1f4a2a88479ed853364b857b0711cb4a0685e` |
 | `stash.ixa` | `87b326631d4ef9f4b4ba2c93c46dd73854666b6213d1c5074cb23f9f92bd9e21` |
 | `astral.ixa` | `4f5326b36ba790bf439921e3d0a48c02e425d48bba617a541ef5be58be49b9fa` |
-
-`stash.ixa` and `astral.ixa` are byte-identical to the copies the iXalance project page has
-served since 2000, so both are corroborated across two independent distribution channels.
-That page never carried a `jizz.ixa`, so that one rests on the scene.org copy alone.
 
 Jizz and Stash do not ship music: they *generate* an XM at runtime and hand it to the host
 — 940,876 and 899,710 bytes respectively, which is Probe's "950Kb of music into 20K" from
@@ -237,23 +274,13 @@ first XM cannot leak its terminal tracker position into the second XM.
 
 ## Licensing
 
-Read this before publishing anything built from it.
+The runtime and documentation are licensed under
+[GNU GPL version 2 only](LICENSE). [`lib/xm.js`](lib/xm.js) retains ft2-clone’s compatible
+BSD 3-Clause license and notice.
 
-**The port code derives from GPL-2 source.** The container layout, the LZSS and RLE
-codecs, the DOS/32A relocation pass and the host ABI were all transcribed from
-iXalance-1.0.5 by Jarno Paananen, which is GPL v2. This is a reimplementation in another
-language rather than a copy, but it is a derivation, and the safe reading is that this
-project is GPL-2 as well. That is a decision for the repository owner, which is why there
-is no `LICENSE` file yet.
-
-**The demo data is TBL's.** `STASH.DOC` states the terms plainly: copy and spread — yes;
-for money — no; press on CD — yes; sell it — no; "modify one single bit" — no. Shipping
-the `.IXA` files unmodified for non-commercial use is within that. Redistributing them
-modified, or commercially, is not.
-
-**XM replay behavior is based on ft2-clone**, copyright 2016–2026 Olav Sørensen and
-licensed under the BSD 3-Clause License. Its original license is retained in
-`source/ft2-clone-master/LICENSE`.
+The TBL demo binaries, music, graphics and rendered media are separate copyrighted works;
+they are not covered by either software license and are not stored in Git. See
+[LICENSING.md](LICENSING.md) for the complete file-by-file boundary and provenance.
 
 ## Credits
 
@@ -267,4 +294,5 @@ licensed under the BSD 3-Clause License. Its original license is retained in
   XM player and preserve the original tracker's quirks.
 
 Format archeology, the original extraction tooling and the provenance work live in the
-[demoscene-archeology](../demoscene-archeology/tbl) repository.
+[demoscene-archeology](https://github.com/Jasper2-0/demoscene-archeology/tree/main/tbl)
+repository.

@@ -4,16 +4,27 @@
   "description": "The Black Lotus' iXalance demo loader, ported to the browser: a 386 + x87 interpreter and an XM replayer that run the original 1997 DOS binaries unmodified.",
   "type": "module",
   "private": true,
-  "license": "SEE LICENSING NOTES IN README.md",
+  "author": "Jasper Schelling",
+  "license": "GPL-2.0-only",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/solar-nl/ixalance-js.git"
+  },
+  "homepage": "https://github.com/solar-nl/ixalance-js",
+  "bugs": "https://github.com/solar-nl/ixalance-js/issues",
   "engines": {
     "node": ">=18"
   },
   "scripts": {
+    "data": "node scripts/fetch-data.mjs",
     "serve": "python3 -m http.server 8731 --bind 127.0.0.1",
+    "test": "node run.mjs verify",
     "verify": "node run.mjs verify",
     "jizz": "node run.mjs run data/jizz.ixa",
     "stash": "node run.mjs run data/stash.ixa",
     "astral": "node run.mjs run data/astral.ixa",
+    "pandora:jizz": "node run.mjs pandora data/jizz.ixa out/pandora/jizz",
+    "pandora:stash": "node run.mjs pandora data/stash.ixa out/pandora/stash",
     "bench:jizz": "node run.mjs bench data/jizz.ixa",
     "bench:stash": "node run.mjs bench data/stash.ixa"
   }

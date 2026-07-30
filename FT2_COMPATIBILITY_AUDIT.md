@@ -1,7 +1,9 @@
 # FT2 compatibility audit
 
 This audit compares `lib/xm.js` with the replay behavior in
-`source/ft2-clone-master/src/ft2_replayer.c` and its audio mixer. The target is behavioral
+ft2-clone’s
+[`ft2_replayer.c`](https://github.com/8bitbubsy/ft2-clone/blob/master/src/ft2_replayer.c)
+and audio mixer. The target is behavioral
 compatibility with ft2-clone, including the original FastTracker II quirks that ft2-clone
 deliberately preserves.
 

@@ -111,7 +111,7 @@ export class XmAudio {
 
     // Version the worklet source explicitly: it is fetched as text and therefore is not
     // part of either the page's or worker's ES-module graph.
-    const res = await fetch('./lib/xm.js?v=prod-switching-v15');
+    const res = await fetch('./lib/xm.js?v=pandora-deploy-v26');
     if (!res.ok) throw new Error(`cannot read lib/xm.js (${res.status})`);
     // Strip the ES export keyword; worklet globals are plain script scope.
     const source = (await res.text()).replace(/^export\s+/gm, '');

@@ -39,6 +39,94 @@
   }
   .warn { color: #d8a13d; }
   .err { color: #d85c5c; }
+  /* Debug view: the texture slots as the precalc fills them, and the module it hands over. */
+  #debug { width: min(92vw, 960px); display: flex; flex-direction: column; gap: .5rem; }
+  #debug[hidden] { display: none; }
+  #debug-provenance[hidden], #tex-view-sources[hidden] { display: none; }
+  .dbg-head {
+    display: flex; align-items: baseline; gap: .6rem; flex-wrap: wrap;
+    border-bottom: 1px solid #23282f; padding-bottom: .25rem; margin-top: .4rem;
+  }
+  .dbg-head h2 {
+    font-size: .78rem; font-weight: 600; letter-spacing: .12em; text-transform: uppercase;
+    margin: 0; color: #7f8c99;
+  }
+  .dbg-note { font-size: 11px; color: #5d6773; }
+  .tex-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(116px, 1fr)); gap: .45rem; }
+  .tex, .smp { background: #0e1216; border: 1px solid #23282f; padding: .3rem; }
+  .tex canvas {
+    width: 100%; height: auto; display: block; cursor: zoom-in;
+    image-rendering: pixelated; background: #000;
+    /* The page-wide canvas rule pins 4:3 for the demo screen. Slots are 256x256 or
+       320x200, so let their own dimensions set the ratio instead of being squashed. */
+    aspect-ratio: auto;
+  }
+  .tex .cap, .smp .cap {
+    display: flex; justify-content: space-between; gap: .4rem;
+    font-size: 10px; color: #8b97a3; margin-top: .25rem;
+  }
+  .tex .cap b, .smp .cap b { color: #c8d0d8; font-weight: 600; }
+  .tex .sub, .smp .meta { font-size: 10px; color: #5d6773; }
+  .tex.fresh { border-color: #3d99d8; }
+  .smp-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); gap: .45rem; }
+  .smp canvas {
+    width: 100%; height: 38px; display: block; background: #0b0d10;
+    aspect-ratio: auto; border: 0;
+  }
+  .smp .cap { align-items: center; }
+  .smp .play {
+    padding: 0 .4rem; font-size: 11px; line-height: 1.5; border-radius: 2px;
+    min-width: 1.8rem; flex: none;
+  }
+  .smp .play.playing { border-color: #3d99d8; color: #3d99d8; }
+  .smp .cap b { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .trace-list {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: .4rem; margin-top: .35rem;
+  }
+  .trace-source, .mesh {
+    display: grid; grid-template-columns: auto 1fr; gap: .4rem;
+    background: #0e1216; border: 1px solid #23282f; padding: .35rem;
+    min-width: 0;
+  }
+  .trace-source canvas {
+    width: 72px; height: 72px; aspect-ratio: 1; object-fit: contain;
+    border: 0; image-rendering: pixelated; background: #080a0c;
+  }
+  .trace-source .meta, .mesh .meta {
+    min-width: 0; font-size: 10px; color: #68737f; overflow-wrap: anywhere;
+  }
+  .trace-source b, .mesh b { display: block; color: #c8d0d8; font-size: 10px; }
+  .mesh-grid {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(285px, 1fr)); gap: .45rem;
+  }
+  .mesh { display: block; }
+  .mesh canvas {
+    width: 100%; height: auto; aspect-ratio: 4 / 3; border: 0;
+    background: #0a0d10; image-rendering: pixelated;
+  }
+  .mesh .meta { margin-top: .25rem; }
+
+  /* Full-resolution texture viewer. */
+  #tex-view {
+    position: fixed; inset: 0; z-index: 20; padding: 1rem; gap: .6rem;
+    display: flex; flex-direction: column; align-items: center; justify-content: flex-start;
+    overflow-y: auto;
+    background: rgba(6, 8, 10, .93);
+  }
+  #tex-view[hidden] { display: none; }
+  #tex-view canvas {
+    image-rendering: pixelated; background: #000; border: 1px solid #2b323a;
+    aspect-ratio: auto; max-width: 96vw; max-height: 76vh; object-fit: contain;
+  }
+  .tex-view-bar {
+    display: flex; align-items: center; gap: .5rem; flex-wrap: wrap;
+    justify-content: center; font-size: 11px; color: #8b97a3;
+  }
+  .tex-view-bar b { color: #c8d0d8; }
+  .tex-view-bar button { padding: .15rem .5rem; font-size: 11px; }
+  .tex-view-bar button.on { border-color: #3d99d8; color: #3d99d8; }
+  #tex-view-sources { width: min(96vw, 960px); }
   .note { color: #5d6773; font-size: 12px; max-width: min(92vw, 960px); text-align: center; }
 </style>
 
@@ -56,6 +144,7 @@
   <button id="pause" disabled>Pause</button>
   <label><input type="checkbox" id="sound" checked> sound</label>
   <label><input type="checkbox" id="jit" checked> JIT</label>
+  <label><input type="checkbox" id="debug-toggle"> Pandora textures + samples</label>
 </div>
 
 <div id="download" hidden>
@@ -64,6 +153,50 @@
 </div>
 
 <div id="stat">idle</div>
+
+<section id="debug" hidden>
+  <div class="dbg-head">
+    <h2>Pandora &mdash; texture slots</h2>
+    <span class="dbg-note" id="dbg-tex-note">idle</span>
+  </div>
+  <div class="tex-grid" id="dbg-textures"></div>
+
+  <div id="debug-provenance" hidden>
+    <div class="dbg-head">
+      <h2>Experimental &mdash; provenance, LUTs and observed-stride geometry</h2>
+      <span class="dbg-note" id="dbg-scene-note">
+        waiting for a sampled screen flip
+      </span>
+    </div>
+    <div class="mesh-grid" id="dbg-meshes"></div>
+    <div class="trace-list" id="dbg-scene-sources"></div>
+  </div>
+
+  <div class="dbg-head">
+    <h2>Generated module &mdash; samples</h2>
+    <span class="dbg-note" id="dbg-smp-note">
+      the intro synthesises its module during the precalc and hands it to the host in one
+      go, so these appear all at once at the end
+    </span>
+  </div>
+  <div class="smp-list" id="dbg-samples"></div>
+</section>
+
+<div id="tex-view" hidden>
+  <div class="tex-view-bar">
+    <b id="tex-view-name"></b>
+    <span id="tex-view-meta"></span>
+    <button data-zoom="1">1&times;</button>
+    <button data-zoom="2">2&times;</button>
+    <button data-zoom="4">4&times;</button>
+    <button id="tex-view-prev" title="previous write epoch">&larr;</button>
+    <span id="tex-view-step"></span>
+    <button id="tex-view-next" title="next write epoch">&rarr;</button>
+    <button id="tex-view-close">close</button>
+  </div>
+  <canvas id="tex-view-canvas"></canvas>
+  <div class="trace-list" id="tex-view-sources"></div>
+</div>
 
 <p class="note">
   Select one of the original TBL productions from the dropdown and press &ldquo;Load and run&rdquo;.
@@ -81,8 +214,9 @@
 <div id="log"></div>
 
 <script type="module">
-import { XmAudio } from './audio.js?v=prod-switching-v15';
-import { RunSessionManager } from './lib/run-session.js?v=prod-switching-v15';
+import { XmAudio } from './audio.js?v=pandora-deploy-v26';
+import { RunSessionManager } from './lib/run-session.js?v=pandora-deploy-v26';
+import { XmPlayer } from './lib/xm.js?v=pandora-deploy-v26';
 
 const canvas = document.getElementById('screen');
 const ctx = canvas.getContext('2d', { alpha: false });
@@ -93,10 +227,41 @@ const pauseBtn = document.getElementById('pause');
 const prodSel = document.getElementById('prod');
 const soundBox = document.getElementById('sound');
 const jitBox = document.getElementById('jit');
+const debugBox = document.getElementById('debug-toggle');
+const debugEl = document.getElementById('debug');
+const provenanceEl = document.getElementById('debug-provenance');
+const texGrid = document.getElementById('dbg-textures');
+const texNote = document.getElementById('dbg-tex-note');
+const smpList = document.getElementById('dbg-samples');
+const smpNote = document.getElementById('dbg-smp-note');
+const sceneNote = document.getElementById('dbg-scene-note');
+const meshGrid = document.getElementById('dbg-meshes');
+const sceneSources = document.getElementById('dbg-scene-sources');
+const texView = document.getElementById('tex-view');
+
+// The source-derived Square port is intentionally not distributed with the
+// original TBL data. Offer it when a local build has produced the container,
+// without leaving a broken selector entry in deployments that do not have it.
+fetch('./sdk/ixalance-sdk/ports/square/square.ixa', { method: 'HEAD', cache: 'no-store' })
+  .then((response) => {
+    if (!response.ok) return;
+    const option = document.createElement('option');
+    option.value = './sdk/ixalance-sdk/ports/square/square.ixa';
+    option.textContent = 'Square — Pulse, 1997 (source port)';
+    prodSel.append(option);
+  })
+  .catch(() => {});
+const texViewCanvas = document.getElementById('tex-view-canvas');
+const texViewName = document.getElementById('tex-view-name');
+const texViewMeta = document.getElementById('tex-view-meta');
+const texViewSources = document.getElementById('tex-view-sources');
+const texViewStep = document.getElementById('tex-view-step');
+const texViewPrev = document.getElementById('tex-view-prev');
+const texViewNext = document.getElementById('tex-view-next');
 const downloadEl = document.getElementById('download');
 const downloadProgress = document.getElementById('download-progress');
 const downloadText = document.getElementById('download-text');
-const BROWSER_BUILD = 'prod-switching-v15';
+const BROWSER_BUILD = 'pandora-deploy-v26';
 const RUNTIME_MODULES = [
   './audio.js',
   './worker.js',
@@ -109,9 +274,17 @@ const RUNTIME_MODULES = [
   './lib/jit.js',
   './lib/xm.js',
   './lib/run-session.js',
+  './lib/pandora.js',
+  './lib/memory-trace.js',
+  './lib/provenance.js',
+  './lib/debug-capture.js',
 ];
+const QUERY = new URLSearchParams(location.search);
+const EXPERIMENTAL_PROVENANCE = QUERY.get('provenance') === '1';
+provenanceEl.hidden = !EXPERIMENTAL_PROVENANCE;
+texViewSources.hidden = !EXPERIMENTAL_PROVENANCE;
 // Keep the interpreter available as the reference engine for comparison runs.
-if (new URLSearchParams(location.search).get('engine') === 'cpu') jitBox.checked = false;
+if (QUERY.get('engine') === 'cpu') jitBox.checked = false;
 
 let pending = null;
 let raf = 0;
@@ -150,6 +323,517 @@ function clearScreen() {
 function isActive(run) {
   return sessions.isActive(run);
 }
+
+// ----------------------------------------------------------- Pandora / experimental view
+
+// One tile per texture slot, created on the slot's first appearance and reused after
+// that: the worker only sends a slot whose bytes actually changed, so a tile arriving
+// again means the generator wrote to that buffer, and the count is worth showing.
+const texTiles = new Map();
+
+function resetDebugPanels() {
+  stopPreview();
+  closeTexture();
+  for (const tile of texTiles.values()) clearTimeout(tile.timer);
+  texTiles.clear();
+  texGrid.textContent = '';
+  smpList.textContent = '';
+  meshGrid.textContent = '';
+  sceneSources.textContent = '';
+  texNote.textContent = debugBox.checked ? 'waiting for a part to start…' : 'idle';
+  if (EXPERIMENTAL_PROVENANCE) {
+    sceneNote.textContent = 'waiting for a sampled screen flip';
+  }
+  smpNote.textContent = 'the intro synthesises its module during the precalc and hands it '
+    + 'to the host in one go, so these appear all at once at the end';
+}
+
+function showTexture(data) {
+  let tile = texTiles.get(data.name);
+  if (!tile) {
+    const el = document.createElement('div');
+    el.className = 'tex';
+    const canvas = document.createElement('canvas');
+    canvas.width = data.width;
+    canvas.height = data.height;
+    const cap = document.createElement('div');
+    cap.className = 'cap';
+    const sub = document.createElement('div');
+    sub.className = 'sub';
+    el.append(canvas, cap, sub);
+    texGrid.append(el);
+    tile = {
+      el, canvas, ctx: canvas.getContext('2d'), cap, sub,
+      updates: 0, timer: 0, info: null, history: [], viewIndex: -1,
+    };
+    texTiles.set(data.name, tile);
+    canvas.title = 'view at original resolution';
+    canvas.onclick = () => openTexture(data.name);
+  }
+  const followedLatest = tile.viewIndex < 0 || tile.viewIndex === tile.history.length - 1;
+  tile.history.push(data);
+  if (tile.history.length > 64) tile.history.shift();
+  if (followedLatest) tile.viewIndex = tile.history.length - 1;
+  tile.info = data;
+
+  tile.ctx.putImageData(new ImageData(data.pixels, data.width, data.height), 0, 0);
+  tile.updates++;
+  tile.cap.textContent = '';
+  const name = document.createElement('b');
+  name.textContent = data.name;
+  const slot = document.createElement('span');
+  slot.textContent = `slot ${data.slot}`;
+  tile.cap.append(name, slot);
+  tile.sub.textContent =
+    `${data.layout}${data.frozen ? ' · snapshot' : ` · ${data.reason ?? 'write epoch'}`}`
+    + ` · ${(data.at / 1e6).toFixed(0)}M`
+    + (data.writes == null ? '' : ` · ${data.writes.toLocaleString()} guest writes`)
+    + ` · stage ${tile.history.length}`;
+
+  // Flash the border so a slot being actively worked on is obvious in a grid of sixteen.
+  tile.el.classList.add('fresh');
+  clearTimeout(tile.timer);
+  tile.timer = setTimeout(() => tile.el.classList.remove('fresh'), 450);
+  texNote.textContent = `${texTiles.size} slot${texTiles.size === 1 ? '' : 's'} populated`;
+
+  // A slot being watched full-size should keep updating there too, not just in the grid.
+  if (texViewName.dataset.name === data.name) drawTextureView();
+}
+
+function renderSources(container, sources, clear = true) {
+  if (clear) container.textContent = '';
+  for (const source of sources ?? []) {
+    const el = document.createElement('div');
+    el.className = 'trace-source';
+    if (source.preview?.pixels) {
+      const preview = document.createElement('canvas');
+      preview.width = source.preview.width;
+      preview.height = source.preview.height;
+      preview.getContext('2d').putImageData(
+        new ImageData(source.preview.pixels, preview.width, preview.height), 0, 0,
+      );
+      el.append(preview);
+    }
+    const meta = document.createElement('div');
+    meta.className = 'meta';
+    if (!source.preview?.pixels) meta.style.gridColumn = '1 / -1';
+    const title = document.createElement('b');
+    title.textContent = source.source
+      ? `${source.type} · ${source.source}`
+      : source.type;
+    const details = document.createElement('span');
+    details.textContent =
+      `${source.range} · ${source.access} reads · ${source.reads.toLocaleString()} accesses`
+      + ` · ${(source.sequential * 100).toFixed(0)}% sequential`
+      + ` · ${source.uniqueSaturated ? '≥' : ''}${source.unique.toLocaleString()}`
+      + ` observed address${source.unique === 1 ? '' : 'es'}`
+      + (source.stride
+        ? ` · dominant Δ ${source.stride} (${(source.strideSupport * 100).toFixed(0)}%)`
+        : '')
+      + ` · ${source.evidence} · reader ${source.eipHex}`
+      + (source.preview ? ` · ${source.preview.kind}, ${source.preview.mapped} cells` : '');
+    meta.append(title, details);
+    el.append(meta);
+    container.append(el);
+  }
+}
+
+function renderTextureTrace(container, info) {
+  container.textContent = '';
+  if (info.destination) {
+    const destination = document.createElement('div');
+    destination.className = 'trace-source';
+    destination.style.gridColumn = '1 / -1';
+    const meta = document.createElement('div');
+    meta.className = 'meta';
+    meta.style.gridColumn = '1 / -1';
+    const title = document.createElement('b');
+    title.textContent = `destination ${info.name}`;
+    const detail = document.createElement('span');
+    detail.textContent = `${info.destination.range} · ${info.writers.length} writer site`
+      + `${info.writers.length === 1 ? '' : 's'}`;
+    meta.append(title, detail);
+    destination.append(meta);
+    container.append(destination);
+  }
+  for (const writer of info.writers ?? []) {
+    const el = document.createElement('div');
+    el.className = 'trace-source';
+    const meta = document.createElement('div');
+    meta.className = 'meta';
+    meta.style.gridColumn = '1 / -1';
+    const title = document.createElement('b');
+    title.textContent = `writer ${writer.eipHex}`;
+    const detail = document.createElement('span');
+    detail.textContent =
+      `${writer.range} · ${writer.writes.toLocaleString()} writes`
+      + ` · ${(writer.share * 100).toFixed(1)}% of epoch`;
+    meta.append(title, detail);
+    el.append(meta);
+    container.append(el);
+  }
+  renderSources(container, info.sources, false);
+}
+
+// ------------------------------------------------- full-resolution texture viewer
+
+let texViewZoom = 1;
+
+/**
+ * Blit the open slot at `texViewZoom` device-independent pixels per texel.
+ *
+ * The source is the grid tile's own canvas, which is already sized to the texture's
+ * native dimensions, so there is nothing to keep in sync and no second copy of the
+ * pixels: the backing store is 1:1 and only the CSS box is scaled.
+ */
+function drawTextureView() {
+  const tile = texTiles.get(texViewName.dataset.name);
+  if (!tile?.history.length) return;
+  tile.viewIndex = Math.max(0, Math.min(tile.history.length - 1, tile.viewIndex));
+  const info = tile.history[tile.viewIndex];
+  const { width, height, layout, slot, at } = info;
+  if (texViewCanvas.width !== width || texViewCanvas.height !== height) {
+    texViewCanvas.width = width;
+    texViewCanvas.height = height;
+  }
+  const g = texViewCanvas.getContext('2d');
+  g.putImageData(new ImageData(info.pixels, width, height), 0, 0);
+  texViewCanvas.style.width = `${width * texViewZoom}px`;
+  texViewCanvas.style.height = `${height * texViewZoom}px`;
+  texViewMeta.textContent =
+    `slot ${slot} · ${layout} · ${width}×${height} · ${(at / 1e6).toFixed(0)}M`
+    + ` · ${info.reason ?? (info.frozen ? 'snapshot' : 'live')}`
+    + (info.writes == null
+      ? ''
+      : ` · ${info.writes.toLocaleString()} writes · ${(info.coverage * 100).toFixed(0)}% coverage`);
+  texViewStep.textContent = `${tile.viewIndex + 1} / ${tile.history.length}`;
+  texViewPrev.disabled = tile.viewIndex === 0;
+  texViewNext.disabled = tile.viewIndex === tile.history.length - 1;
+  if (EXPERIMENTAL_PROVENANCE) renderTextureTrace(texViewSources, info);
+}
+
+function openTexture(name) {
+  const tile = texTiles.get(name);
+  if (tile) tile.viewIndex = tile.history.length - 1;
+  texViewName.dataset.name = name;
+  texViewName.textContent = name;
+  texView.hidden = false;
+  drawTextureView();
+}
+
+function closeTexture() {
+  texView.hidden = true;
+  delete texViewName.dataset.name;
+  texViewSources.textContent = '';
+}
+
+for (const button of texView.querySelectorAll('[data-zoom]')) {
+  button.onclick = () => {
+    texViewZoom = Number(button.dataset.zoom);
+    for (const other of texView.querySelectorAll('[data-zoom]')) {
+      other.classList.toggle('on', other === button);
+    }
+    drawTextureView();
+  };
+}
+texView.querySelector('[data-zoom="1"]').classList.add('on');
+document.getElementById('tex-view-close').onclick = closeTexture;
+texViewPrev.onclick = () => {
+  const tile = texTiles.get(texViewName.dataset.name);
+  if (tile) { tile.viewIndex--; drawTextureView(); }
+};
+texViewNext.onclick = () => {
+  const tile = texTiles.get(texViewName.dataset.name);
+  if (tile) { tile.viewIndex++; drawTextureView(); }
+};
+// Clicking the backdrop closes; clicking the image or the toolbar does not.
+texView.onclick = (e) => { if (e.target === texView) closeTexture(); };
+addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !texView.hidden) closeTexture();
+});
+
+// -------------------------------- software-renderer provenance / inferred geometry
+
+function showScene(data) {
+  meshGrid.textContent = '';
+  const at = (data.at / 1e6).toFixed(0);
+  sceneNote.textContent =
+    `sampled at ${at}M instructions · ${data.writes.toLocaleString()} framebuffer writes`
+    + ` · ${data.meshes.length} access-backed mesh candidate${data.meshes.length === 1 ? '' : 's'}`;
+
+  for (const mesh of data.meshes) {
+    const el = document.createElement('div');
+    el.className = 'mesh';
+    const canvas = document.createElement('canvas');
+    canvas.width = mesh.preview.width;
+    canvas.height = mesh.preview.height;
+    canvas.getContext('2d').putImageData(
+      new ImageData(mesh.preview.pixels, canvas.width, canvas.height), 0, 0,
+    );
+    const meta = document.createElement('div');
+    meta.className = 'meta';
+    const title = document.createElement('b');
+    title.textContent =
+      `observed-stride float32 xyz candidate`;
+    const bounds = mesh.bounds
+      .map(([lo, hi], axis) => `${'xyz'[axis]} ${lo.toPrecision(4)}…${hi.toPrecision(4)}`)
+      .join(' · ');
+    const detail = document.createElement('span');
+    detail.textContent =
+      `${mesh.range} · stride ${mesh.stride} · ${mesh.vertices}/${mesh.records} valid records`
+      + ` · fields +${mesh.fieldOffsets.join('/+')} · readers ${mesh.readerEipHex.join(', ')}`
+      + ` · ${(mesh.strideSupport * 100).toFixed(0)}% stride support`
+      + ` · ancestry depth ${mesh.depth} · ${mesh.preview.axes} projection`
+      + ` · ${mesh.preview.topology}`
+      + (mesh.index
+        ? ` (${mesh.index.range}, ${mesh.index.size * 8}-bit, `
+          + `${mesh.index.triangles} observed triangles, reader ${mesh.index.readerEipHex})`
+        : '')
+      + ` · ${bounds}`;
+    meta.append(title, detail);
+    el.append(canvas, meta);
+    meshGrid.append(el);
+  }
+  if (data.meshes.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'dbg-note';
+    empty.textContent =
+      'No framebuffer ancestor had three observed float field readers with a shared record stride.';
+    meshGrid.append(empty);
+  }
+  renderTextureTrace(sceneSources, { ...data, name: 'framebuffer' });
+}
+
+// ------------------------------------------------------------- sample auditioning
+
+// One preview at a time, on its own context so it is independent of the worklet that
+// plays the demo's music — the debug panel works with sound switched off entirely.
+let previewCtx = null, previewSource = null, previewButton = null;
+
+function stopPreview() {
+  if (previewSource) {
+    previewSource.onended = null;
+    try { previewSource.stop(); } catch { /* already finished */ }
+    previewSource.disconnect();
+    previewSource = null;
+  }
+  if (previewButton) {
+    previewButton.textContent = '▶';
+    previewButton.classList.remove('playing');
+    previewButton = null;
+  }
+}
+
+/**
+ * Render one held XI note through the same FT2-compatible mixer as soundtrack playback.
+ *
+ * A fixed key-down interval makes looping instruments audible; the subsequent real
+ * key-off lets the volume envelope and fadeout end the note. A short quiet tail detector
+ * avoids padding naturally finished one-shot samples out to the four-second safety cap.
+ */
+function renderInstrumentAudition(player, sample) {
+  const { sampleRate } = player;
+  const voice = player.startInstrumentAudition(
+    sample.instrument,
+    sample.usualNote,
+    sample.sampleIndex,
+  );
+  if (!voice?.playing) return null;
+
+  const holdFrames = Math.round(sampleRate * 1.5);
+  const maximumFrames = Math.round(sampleRate * 4);
+  const quietNeeded = Math.round(sampleRate * 0.12);
+  const left = new Float32Array(maximumFrames);
+  const right = new Float32Array(maximumFrames);
+  let done = 0, released = false, quietFrames = 0, outputFrames = maximumFrames;
+
+  while (done < maximumFrames) {
+    if (!released && done >= holdFrames) {
+      player.keyOffChannel(voice);
+      released = true;
+    }
+    let count = Math.min(128, maximumFrames - done);
+    if (!released) count = Math.min(count, holdFrames - done);
+    if (count <= 0) continue;
+
+    const l = left.subarray(done, done + count);
+    const r = right.subarray(done, done + count);
+    player.render(l, r, count);
+    done += count;
+
+    // A non-looping sample that ends during key-down has no XI release left to hear.
+    if (!released && !voice.playing) {
+      outputFrames = done;
+      break;
+    }
+    if (released) {
+      let peak = 0;
+      for (let i = 0; i < count; i++) {
+        peak = Math.max(peak, Math.abs(l[i]), Math.abs(r[i]));
+      }
+      quietFrames = peak < 1e-5 ? quietFrames + count : 0;
+      if (!voice.playing || quietFrames >= quietNeeded) {
+        outputFrames = done;
+        break;
+      }
+    }
+  }
+
+  // The safety cap can truncate an XI with no usable release. Fade only its final few
+  // milliseconds to avoid manufacturing a click that is not part of the instrument.
+  if (outputFrames === maximumFrames) {
+    const fadeFrames = Math.min(256, outputFrames);
+    for (let i = 0; i < fadeFrames; i++) {
+      const gain = (fadeFrames - i - 1) / fadeFrames;
+      left[outputFrames - fadeFrames + i] *= gain;
+      right[outputFrames - fadeFrames + i] *= gain;
+    }
+  }
+  return { left, right, frames: outputFrames };
+}
+
+function playInstrument(getPlayer, sample, button) {
+  const wasPlaying = previewButton === button;
+  stopPreview();
+  if (wasPlaying || !getPlayer || !sample.frames || !sample.hz) return;
+
+  previewCtx ??= new (globalThis.AudioContext ?? globalThis.webkitAudioContext)();
+  if (previewCtx.state === 'suspended') {
+    previewCtx.resume().catch((error) =>
+      log(`XI audition could not resume audio: ${error.message ?? error}`, 'warn'));
+  }
+
+  let rendered;
+  try {
+    rendered = renderInstrumentAudition(getPlayer(previewCtx.sampleRate), sample);
+  } catch (error) {
+    log(`XI audition failed: ${error.message ?? error}`, 'warn');
+    return;
+  }
+  if (!rendered) return;
+
+  const buffer =
+    previewCtx.createBuffer(2, rendered.frames, previewCtx.sampleRate);
+  buffer.getChannelData(0).set(rendered.left.subarray(0, rendered.frames));
+  buffer.getChannelData(1).set(rendered.right.subarray(0, rendered.frames));
+
+  const source = previewCtx.createBufferSource();
+  source.buffer = buffer;
+  // XmPlayer reserves headroom for a full tracker mix. Restore sensible solo-instrument
+  // loudness without altering its own sample volume or volume-envelope shape.
+  const gain = previewCtx.createGain();
+  gain.gain.value = 2.5;
+  source.connect(gain).connect(previewCtx.destination);
+  source.onended = () => { if (previewSource === source) stopPreview(); };
+  source.start();
+
+  previewSource = source;
+  previewButton = button;
+  button.textContent = '■';
+  button.classList.add('playing');
+}
+
+const LOOP_NAMES = ['no loop', 'forward', 'ping-pong'];
+
+/** Two signed bytes per bucket: the minimum and maximum the sample reached inside it. */
+function drawPeaks(canvas, peaks) {
+  const g = canvas.getContext('2d');
+  const w = canvas.width, h = canvas.height, mid = h / 2;
+  const n = peaks.length / 2;
+  g.clearRect(0, 0, w, h);
+  g.fillStyle = '#23282f';
+  g.fillRect(0, Math.floor(mid), w, 1);
+  g.fillStyle = '#3d99d8';
+  const step = Math.max(1, Math.ceil(w / n));
+  for (let i = 0; i < n; i++) {
+    const lo = peaks[i * 2] / 128, hi = peaks[i * 2 + 1] / 128;
+    const top = mid - hi * mid;
+    const bottom = mid - lo * mid;
+    g.fillRect(Math.floor(i * w / n), top, step, Math.max(1, bottom - top));
+  }
+}
+
+function showSamples(data) {
+  stopPreview();
+  smpList.textContent = '';
+  let auditionPlayer = null;
+  const getAuditionPlayer = data.xm
+    ? (sampleRate) => {
+        if (!auditionPlayer || auditionPlayer.sampleRate !== sampleRate) {
+          auditionPlayer = new XmPlayer(new Uint8Array(data.xm), sampleRate);
+        }
+        return auditionPlayer;
+      }
+    : null;
+  const kib = (data.bytes / 1024).toFixed(0);
+  smpNote.textContent =
+    `soundtrack ${data.generation} · ${data.samples.length} XI samples · ${kib} KiB module`
+    + (data.title ? ` · “${data.title}”` : ' · untitled')
+    + ` · ${data.linearPeriods ? 'linear' : 'Amiga'} periods`
+    + ` · handed over at ${(data.at / 1e6).toFixed(0)}M instructions`;
+
+  for (const s of data.samples) {
+    const el = document.createElement('div');
+    el.className = 'smp';
+    const canvas = document.createElement('canvas');
+    canvas.width = 300;
+    canvas.height = 38;
+    el.append(canvas);
+
+    const cap = document.createElement('div');
+    cap.className = 'cap';
+    const play = document.createElement('button');
+    play.className = 'play';
+    play.textContent = '▶';
+    play.title = s.pitchSource === 'pattern'
+      ? `play XI instrument at its usual XM pitch (${s.usualNoteName})`
+      : 'play XI instrument at C-4 (sample is not triggered in the written song order)';
+    play.disabled = !data.xm || !s.hz;
+    play.onclick = () => playInstrument(getAuditionPlayer, s, play);
+    const name = document.createElement('b');
+    name.textContent = s.name || `instrument ${s.instrument}`;
+    const rate = document.createElement('span');
+    // XM stores no sample rate. This is the modal note start found in the song, adjusted
+    // by the physical sample's relative note and finetune.
+    rate.textContent = s.hz
+      ? `${Math.round(s.hz)} Hz @ ${s.usualNoteName}`
+      : '—';
+    cap.append(play, name, rate);
+
+    // Bucket extremes pinned to the rail are the synth's saturating clamp showing
+    // through, which is worth seeing next to the waveform that caused it.
+    let railed = 0;
+    for (let i = 0; i < s.peaks.length; i += 2) {
+      if (s.peaks[i + 1] >= 127 || s.peaks[i] <= -127) railed++;
+    }
+    const railPct = railed / (s.peaks.length / 2) * 100;
+
+    const meta = document.createElement('div');
+    meta.className = 'meta';
+    meta.textContent =
+      `${s.frames.toLocaleString()} frames · ${s.bits}-bit · `
+      + `rel ${s.relativeNote > 0 ? '+' : ''}${s.relativeNote} · ft ${s.finetune} · `
+      + `${LOOP_NAMES[s.loopType] ?? '?'}`
+      + (s.pitchSource === 'pattern'
+        ? ` · usual note ${s.usualNoteUses}/${s.noteUses} starts`
+        : ' · C-4 fallback (unused)')
+      + (railed ? ` · ${railPct.toFixed(0)}% at rail` : '');
+
+    el.append(cap, meta);
+    smpList.append(el);
+    drawPeaks(canvas, s.peaks);
+  }
+}
+
+debugBox.onchange = () => {
+  debugEl.hidden = !debugBox.checked;
+  if (!debugBox.checked) return;
+  if (sessions.current && texTiles.size === 0) {
+    // Capture is wired up while the production loads, so it cannot be switched on
+    // half way through a run that did not ask for it.
+    texNote.textContent = 'restart the production to capture — Pandora is set up at load time';
+  }
+};
 
 function updateRunControls() {
   startBtn.disabled = false;
@@ -215,6 +899,8 @@ startBtn.onclick = async () => {
   updateRunControls();
   logEl.textContent = '';
   statEl.textContent = 'starting';
+  debugEl.hidden = !debugBox.checked;
+  resetDebugPanels();
   downloadEl.hidden = false;
   downloadProgress.removeAttribute('value');
   downloadText.textContent = 'Preparing runtime…';
@@ -308,6 +994,25 @@ startBtn.onclick = async () => {
           run.audio = null;
         });
         break;
+      case 'debug-status':
+        if (data.production) {
+          texNote.textContent = `${data.production}: ${data.slots} recovered slots`
+            + (data.verified ? '' : ' (profile unverified)')
+            + (data.provenance ? ' · experimental provenance' : '');
+        } else {
+          texNote.textContent = `no Pandora slots · generated samples only`;
+          if (data.provenance) texNote.textContent += ` · experimental provenance`;
+        }
+        break;
+      case 'debug-texture':
+        showTexture(data);
+        break;
+      case 'debug-scene':
+        if (EXPERIMENTAL_PROVENANCE) showScene(data);
+        break;
+      case 'debug-samples':
+        showSamples(data);
+        break;
       case 'stat':
         statEl.textContent =
           `${(data.count / 1e6).toFixed(1)}M instructions · `
@@ -347,6 +1052,11 @@ startBtn.onclick = async () => {
     fps: 50,
     // The interpreter remains selectable as the reference engine.
     engine: run.engine,
+    // Read once, at load: the texture watcher needs the profile resolved before the part
+    // is relocated, so this cannot be turned on part way through a run.
+    debug: debugBox.checked,
+    // Experimental LUT/geometry work is deliberately absent from normal Pandora mode.
+    provenance: debugBox.checked && EXPERIMENTAL_PROVENANCE,
   });
 };
 

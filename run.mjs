@@ -7,6 +7,7 @@
 //       Name a block to load and run that one alone, for probing a part in isolation.
 //   node run.mjs dumpxm <file.ixa> <out.xm>    capture the module a part generates
 //   node run.mjs renderxm <file.xm> <out.wav> [seconds]
+//   node run.mjs pandora <file.ixa> <outdir>    export generated textures as TGA
 //   node run.mjs bench <file.ixa> [options]     benchmark generated-music intros by XM phase
 //       --engine cpu|jit|both  --from ORDER  --to ORDER  --repeat N
 //       --orders 1,4,7-9      run only those orders, each from an exact cached boundary
@@ -25,10 +26,15 @@ import { deflateSync } from 'node:zlib';
 import { readIxa, unpackBlock, parseScript, classify } from './lib/ixa.js';
 import { Machine, partmemFor } from './lib/machine.js';
 import { Sequencer } from './lib/sequencer.js';
-import { CPU, Unimplemented, Fault } from './lib/cpu.js';
+import { CPU, REG, Unimplemented, Fault } from './lib/cpu.js';
 import { JitCPU } from './lib/jit.js';
 import { XmPlayer } from './lib/xm.js';
 import { RunSessionManager } from './lib/run-session.js';
+import {
+  PANDORA_BYTES, pandoraBgr, pandoraPointer, pandoraProfile,
+} from './lib/pandora.js';
+import { TextureWatcher, noteHz, summariseSamples } from './lib/debug-capture.js';
+import { AccessProvenance } from './lib/provenance.js';
 
 // The JIT is the production engine; keep the interpreter one environment variable away
 // as the reference path for differential checks.
@@ -118,6 +124,19 @@ function verify() {
   process.stdout.write(
     `multi-XM position handoff: ${handoffOk ? 'match' : 'MISMATCH'}`
     + ` (${handoff.musicPos}:${handoff.musicRow})\n`);
+
+  // The real MIDAS player and XmPlayer loop at the XM restart order. The
+  // sound-off fallback clock must wrap too: some executable parts wait for
+  // curpos to fall back to the song opening before they far-return.
+  handoff.externalMusic = false;
+  const rowsPerSecond = (handoff.xm.bpm * 2 / 5) / handoff.xm.speed;
+  handoff.virtualMs = (handoff.xm.totalRows + 2.25) * 1000 / rowsPerSecond;
+  handoff.updateMusic();
+  const loopClockOk = handoff.musicPos === handoff.xm.restart && handoff.musicRow === 2;
+  if (loopClockOk) ok++; else fail++;
+  process.stdout.write(
+    `sound-off XM restart loop: ${loopClockOk ? 'match' : 'MISMATCH'}`
+    + ` (${handoff.musicPos}:${handoff.musicRow}, restart ${handoff.xm.restart})\n`);
 
   // A second Start click can arrive while the previous worker is playing, downloading,
   // or still awaiting Safari's AudioWorklet setup. Ownership must move synchronously so
@@ -246,6 +265,70 @@ function verify() {
   // permanent replay regression without regenerating Jizz/Stash's modules during every
   // verify run. Also pin the less visible FT2 rules that previously differed here.
   const astralXmBytes = unpackBlock(astralBytes, astral.entries[6]);
+  const sampleSummary = summariseSamples(astralXmBytes);
+  const patternPitchedSamples =
+    sampleSummary.samples.filter((sample) => sample.pitchSource === 'pattern');
+  const samplePitchOk = patternPitchedSamples.length > 0
+    && patternPitchedSamples.some((sample) => sample.usualNote !== 49)
+    && patternPitchedSamples.every((sample) =>
+      sample.usualNoteUses > 0
+      && sample.usualNoteUses <= sample.noteUses
+      && sample.hz === noteHz(
+        sample.usualNote,
+        sample.relativeNote,
+        sample.finetune,
+        sampleSummary.linearPeriods,
+      ));
+  if (samplePitchOk) ok++; else fail++;
+  process.stdout.write(
+    `XM sample audition pitches: ${samplePitchOk ? 'match' : 'MISMATCH'}`
+    + ` (${patternPitchedSamples.length}/${sampleSummary.samples.length} samples used, `
+    + 'modal notes mapped through instrument keymaps)\n',
+  );
+
+  // The inspector must audition an XI instrument, not ask Web Audio to loop raw PCM.
+  // Astral instrument 1 supplies a compact permanent fixture: its sample ping-pongs, its
+  // volume envelope sustains, and note-off engages a nonzero instrument fadeout.
+  const xiSample = patternPitchedSamples.find(
+    (sample) => sample.instrument === 1 && sample.loopType === 2,
+  );
+  const xiAudition = new XmPlayer(astralXmBytes, 48_000);
+  const xiVoice = xiSample
+    ? xiAudition.startInstrumentAudition(
+        xiSample.instrument,
+        xiSample.usualNote,
+        xiSample.sampleIndex,
+      )
+    : null;
+  const xiInstrument = xiSample
+    ? xiAudition.instruments[xiSample.instrument - 1]
+    : null;
+  const auditionLeft = new Float32Array(48_000);
+  const auditionRight = new Float32Array(48_000);
+  if (xiVoice) xiAudition.render(auditionLeft, auditionRight, auditionLeft.length);
+  const fadeBeforeRelease = xiVoice?.fadeVol ?? 0;
+  if (xiVoice) {
+    xiAudition.keyOffChannel(xiVoice);
+    const releaseFrames = Math.ceil(xiAudition.samplesPerTick * 2);
+    xiAudition.render(
+      new Float32Array(releaseFrames),
+      new Float32Array(releaseFrames),
+      releaseFrames,
+    );
+  }
+  const xiAuditionOk = xiVoice !== null
+    && xiVoice.sample === xiInstrument.samples[xiSample.sampleIndex]
+    && xiVoice.sample.loopType === 2
+    && xiVoice.volEnv === xiInstrument.volEnv
+    && xiVoice.keyOff
+    && xiVoice.fadeVol < fadeBeforeRelease
+    && auditionLeft.some((value) => value !== 0)
+    && auditionRight.some((value) => value !== 0);
+  if (xiAuditionOk) ok++; else fail++;
+  process.stdout.write(
+    `XI sample inspector audition: ${xiAuditionOk ? 'match' : 'MISMATCH'}`
+    + ' (physical sample, ping-pong loop, stereo mix, envelope, note-off/fadeout)\n',
+  );
   const xm = new XmPlayer(astralXmBytes, 48_000);
   const xmChannel = xm.ch[0];
   xmChannel.panning = xmChannel.finalPan = 77;
@@ -479,6 +562,420 @@ function verify() {
     + ` (E8 ${e8Ok ? 'dummy' : 'wrong'}, memory ${memoryOk ? 'match' : 'wrong'}, `
     + `pan envelope ${panEnvelopeOk ? 'active' : 'missing'}, `
     + `song loop ${songLooped ? 'reached' : 'missing'})\n`);
+
+  // Pandora slots mix planar, packed and monochrome results; MAP1A additionally starts at
+  // a wrapped texture origin, while Stash slot 15 is a 320x200 image in a 192 KiB slot.
+  // Keep conversion independent of the multi-billion-instruction integration command so
+  // ordinary verification catches channel, dimension and row-order regressions.
+  const packedTexture = new Uint8Array(PANDORA_BYTES);
+  packedTexture.set([1, 2, 3], 0);
+  const shifted = (64 * 256 + 64) * 3;
+  packedTexture.set([4, 5, 6], shifted);
+  const planarTexture = new Uint8Array(PANDORA_BYTES);
+  planarTexture[0] = 7;
+  planarTexture[0x10000] = 8;
+  planarTexture[0x20000] = 9;
+  planarTexture[0x20000 + 1] = 10;
+  const packedBgr = pandoraBgr(packedTexture, 'packed');
+  const shiftedBgr = pandoraBgr(packedTexture, 'packed', 64, 64);
+  const planarBgr = pandoraBgr(planarTexture, 'planar');
+  const monoBgr = pandoraBgr(planarTexture, 'mono', 1, 0, 256, 256, 2);
+  const screenBgr = pandoraBgr(packedTexture, 'packed', 0, 0, 320, 200);
+  const jizzPandora = pandoraProfile(
+    'Jizz',
+    '5c55d364740911715e6ee50fafd1f4a2a88479ed853364b857b0711cb4a0685e',
+  );
+  const weirdtxt = jizzPandora.textures.find((texture) => texture.slot === 6);
+  const logo2 = jizzPandora.textures.find((texture) => texture.slot === 11);
+  const logo1 = jizzPandora.textures.find((texture) => texture.slot === 12);
+  const map15 = jizzPandora.textures.find((texture) => texture.slot === 15);
+  const stashPandora = pandoraProfile(
+    'Stash',
+    '87b326631d4ef9f4b4ba2c93c46dd73854666b6213d1c5074cb23f9f92bd9e21',
+  );
+  const stash13 = stashPandora.textures.find((texture) => texture.slot === 13);
+  const stash15 = stashPandora.textures.find((texture) => texture.slot === 15);
+  const pandoraOk = packedBgr[0] === 3 && packedBgr[1] === 2 && packedBgr[2] === 1
+    && shiftedBgr[0] === 6 && shiftedBgr[1] === 5 && shiftedBgr[2] === 4
+    && planarBgr[0] === 9 && planarBgr[1] === 8 && planarBgr[2] === 7
+    && monoBgr[0] === 10 && monoBgr[1] === 10 && monoBgr[2] === 10
+    && screenBgr.length === 320 * 200 * 3
+    && jizzPandora.textures.length === 16
+    && weirdtxt.dumpPartmemOffset === 0x4ab000
+    && weirdtxt.captureAt === 1_484_000_000
+    && logo2.dumpPartmemOffset === 0x4ab000
+    && logo2.captureAt === 2_084_500_000
+    && logo1.dumpPartmemOffset === 0x41b000
+    && logo1.captureAt === 2_083_000_000
+    && map15.partmemOffset === 0x3eb000
+    && stashPandora.textures.length === 13
+    && stash13.layout === 'mono' && stash13.monoPlane === 2
+    && stash15.layout === 'packed' && stash15.width === 320 && stash15.height === 200;
+  if (pandoraOk) ok++; else fail++;
+  process.stdout.write(
+    `Pandora texture profiles: ${pandoraOk ? 'match' : 'MISMATCH'} `
+    + '(packed, planar, mono, wrapped origin, rectangular output, Jizz/Stash tables)\n',
+  );
+
+  // The browser initially previews ordinary live slots, but exact scratch-backed images
+  // must appear only at their recovered instruction boundary and remain frozen. TBL1 then
+  // replaces every other preview with the same final snapshot the CLI writes.
+  const watcherMachine = new Machine({ clock: 'virtual' });
+  const exactAt = watcherMachine.partmem;
+  const finalAt = exactAt + PANDORA_BYTES;
+  watcherMachine.u8.set([1, 2, 3], exactAt);
+  watcherMachine.u8.set([4, 5, 6], finalAt);
+  const watcher = new TextureWatcher({
+    machine: watcherMachine,
+    imageBase: 0,
+    profile: {
+      production: 'watcher probe',
+      tableOffset: 0,
+      textures: [
+        {
+          slot: 0, name: 'exact', layout: 'packed',
+          dumpPartmemOffset: 0, captureAt: 100,
+        },
+        {
+          slot: 1, name: 'final', layout: 'packed',
+          partmemOffset: PANDORA_BYTES, width: 320, height: 200,
+        },
+      ],
+    },
+  });
+  const nextCapture = watcher.nextCaptureAt(0);
+  const liveShots = watcher.poll(0);
+  const earlyShots = watcher.captureDue(99);
+  const exactShots = watcher.captureDue(100);
+  watcherMachine.u8.set([9, 9, 9], exactAt);
+  const repeatedShots = watcher.captureDue(101);
+  const finalShots = watcher.finalize(200);
+  const settledShots = watcher.poll(201);
+  const experimentalWatcher = new TextureWatcher({
+    machine: watcherMachine,
+    provenance: true,
+  });
+  const watcherOk = watcher.trace === null
+    && experimentalWatcher.trace instanceof AccessProvenance
+    && experimentalWatcher.frameRegion !== null
+    && nextCapture === 100
+    && liveShots.length === 1 && liveShots[0].name === 'final' && !liveShots[0].frozen
+    && earlyShots.length === 0
+    && exactShots.length === 1 && exactShots[0].name === 'exact' && exactShots[0].frozen
+    && exactShots[0].pixels.slice(0, 4).join(',') === '1,2,3,255'
+    && repeatedShots.length === 0
+    && finalShots.length === 1 && finalShots[0].name === 'final' && finalShots[0].frozen
+    && finalShots[0].width === 320 && finalShots[0].height === 200
+    && finalShots[0].pixels.slice(0, 4).join(',') === '4,5,6,255'
+    && settledShots.length === 0;
+  if (watcherOk) ok++; else fail++;
+  process.stdout.write(
+    `Pandora browser snapshots: ${watcherOk ? 'match' : 'MISMATCH'}`
+    + ' (default untraced, gated provenance, exact scratch, TBL1 final, rectangular slot)\n',
+  );
+
+  // Debug tracing substitutes only the guest-data DataView. Prove that compiled integer
+  // templates, x87's direct DataView path and interpreter string operations all reach it.
+  // The provenance probes are intentionally adversarial: fixed scalars must not become
+  // "wave tables", far-apart allocations used by one EIP must not merge, and xyz/index
+  // previews require observed access strides rather than lucky-looking bytes.
+  const traceMachine = new Machine({ clock: 'virtual' });
+  const codeAt = traceMachine.alloc(32);
+  const sourceAt = traceMachine.alloc(16);
+  const destAt = traceMachine.alloc(16);
+  const stringSource = traceMachine.alloc(16);
+  const stringDest = traceMachine.alloc(16);
+  const fpuDest = traceMachine.alloc(16);
+  const stackTop = traceMachine.alloc(4096) + 4096;
+  traceMachine.mem.setUint32(sourceAt, 0x78563412, true);
+  traceMachine.u8.set([9, 8, 7, 6], stringSource);
+  traceMachine.u8[codeAt] = 0xa1;                    // mov eax,[source]
+  traceMachine.mem.setUint32(codeAt + 1, sourceAt, true);
+  traceMachine.u8[codeAt + 5] = 0xa3;                // mov [dest],eax
+  traceMachine.mem.setUint32(codeAt + 6, destAt, true);
+  traceMachine.u8[codeAt + 10] = 0xe9;               // jmp codeAt
+  traceMachine.mem.setInt32(codeAt + 11, -15, true);
+
+  const traceEvents = [];
+  const provenance = new AccessProvenance({
+    machine: traceMachine,
+    onBoundary: (region, info) => traceEvents.push({ region, info }),
+  });
+  const jitRegion = provenance.registerRange({
+    key: 'jit-destination',
+    start: destAt,
+    length: 16,
+    kind: 'probe',
+    labels: ['destination'],
+    capture: true,
+    width: 1,
+    height: 1,
+  });
+  const traceCpu = new JitCPU(traceMachine);
+  traceCpu.reset({
+    entry: codeAt,
+    regs: {
+      eax: 0, ecx: 0, edx: 0, ebx: 0,
+      esp: stackTop, ebp: 0, esi: 0, edi: 0,
+      cs: 0, ds: 0, es: 0, ss: 0, fs: 0, gs: 0,
+    },
+  });
+  provenance.attach(traceCpu, 0);
+  traceCpu.run(256);
+  provenance.force(jitRegion, traceCpu.count, 'probe');
+  traceCpu.fpu.set(0, 1.25);
+  traceCpu.fpu.execute(0xd9, { mod: 0, reg: 2, rm: 0, raw: 0, addr: fpuDest });
+  traceCpu.set32(REG.esi, stringSource);
+  traceCpu.set32(REG.edi, stringDest);
+  traceCpu.set32(REG.ecx, 4);
+  traceCpu.repPrefix = 0xf3;
+  traceCpu.stringOp('movs', 1);
+
+  const lutAt = traceMachine.alloc(4096);
+  const sampledAt = traceMachine.alloc(4096);
+  const lutDest = traceMachine.alloc(1024);
+  for (let i = 0; i < 1024; i++) traceMachine.mem.setUint16(lutAt + i * 2, i, true);
+  const sampledRegion = provenance.registerRange({
+    key: 'sampled-texture',
+    start: sampledAt,
+    length: 32 * 32 * 3,
+    kind: 'texture',
+    labels: ['sampled texture'],
+    capture: false,
+    width: 32,
+    height: 32,
+    layout: 'packed',
+  });
+  let lutInfo = null, scalarInfo = null, clusterInfo = null;
+  let blendInfo = null, scanlineInfo = null, waveInfo = null;
+  let scalarRegion = null, clusterRegion = null;
+  let blendRegion = null, scanlineRegion = null, waveRegion = null;
+  const lutRegion = provenance.registerRange({
+    key: 'lut-destination',
+    start: lutDest,
+    length: 1024,
+    kind: 'texture',
+    labels: ['LUT probe'],
+    capture: true,
+    width: 32,
+    height: 32,
+  });
+  const oldBoundary = provenance.onBoundary;
+  provenance.onBoundary = (region, info) => {
+    if (region === lutRegion) lutInfo = info;
+    if (region === scalarRegion) scalarInfo = info;
+    if (region === clusterRegion) clusterInfo = info;
+    if (region === blendRegion) blendInfo = info;
+    if (region === scanlineRegion) scanlineInfo = info;
+    if (region === waveRegion) waveInfo = info;
+    oldBoundary?.(region, info);
+  };
+  for (let i = 0; i < 1024; i++) {
+    provenance.read(lutAt + i * 2, 2, 'u16', i, codeAt, traceCpu.count + i);
+    const sample = (i * 73) % 1024;
+    provenance.read(
+      sampledAt + sample * 3, 1, 'u8', sample & 255, codeAt + 1, traceCpu.count + i,
+    );
+    provenance.write(lutDest + i, 1, 'u8', i, codeAt + 5, traceCpu.count + i);
+  }
+  provenance.force(lutRegion, traceCpu.count + 1024, 'probe');
+
+  const scalarAt = traceMachine.alloc(16);
+  const scalarDest = traceMachine.alloc(256);
+  scalarRegion = provenance.registerRange({
+    key: 'scalar-destination',
+    start: scalarDest,
+    length: 256,
+    kind: 'probe',
+    capture: true,
+    width: 16,
+    height: 16,
+  });
+  for (let i = 0; i < 256; i++) {
+    provenance.read(scalarAt, 4, 'u32', 7, codeAt + 12, traceCpu.count + i);
+    provenance.write(scalarDest + i, 1, 'u8', i, codeAt + 16, traceCpu.count + i);
+  }
+  provenance.force(scalarRegion, traceCpu.count + 256, 'probe');
+
+  const clusterA = traceMachine.alloc(16);
+  traceMachine.alloc(8192);
+  const clusterB = traceMachine.alloc(16);
+  const clusterDest = traceMachine.alloc(64);
+  clusterRegion = provenance.registerRange({
+    key: 'cluster-destination',
+    start: clusterDest,
+    length: 64,
+    kind: 'probe',
+    capture: true,
+    width: 8,
+    height: 8,
+  });
+  for (let i = 0; i < 32; i++) {
+    const source = (i & 1) === 0 ? clusterA + (i & 12) : clusterB + (i & 12);
+    provenance.read(source, 4, 'u32', i, codeAt + 20, traceCpu.count + i);
+    provenance.write(clusterDest + i, 1, 'u8', i, codeAt + 24, traceCpu.count + i);
+  }
+  provenance.force(clusterRegion, traceCpu.count + 32, 'probe');
+
+  const blendAt = traceMachine.alloc(65536);
+  const blendDest = traceMachine.alloc(1024);
+  blendRegion = provenance.registerRange({
+    key: 'blend-destination',
+    start: blendDest,
+    length: 1024,
+    kind: 'probe',
+    capture: true,
+    width: 32,
+    height: 32,
+  });
+  for (let i = 0; i < 1024; i++) {
+    const lookup = (i * 40503) & 0xffff;
+    provenance.read(blendAt + lookup, 1, 'u8', lookup & 255, codeAt + 28, traceCpu.count + i);
+    provenance.write(blendDest + i, 1, 'u8', i, codeAt + 29, traceCpu.count + i);
+  }
+  provenance.force(blendRegion, traceCpu.count + 1024, 'probe');
+
+  const scanlineAt = traceMachine.alloc(256);
+  const scanlineDest = traceMachine.alloc(4096);
+  scanlineRegion = provenance.registerRange({
+    key: 'scanline-destination',
+    start: scanlineDest,
+    length: 4096,
+    kind: 'probe',
+    capture: true,
+    width: 64,
+    height: 64,
+  });
+  for (let y = 0; y < 64; y++) {
+    provenance.read(
+      scanlineAt + y * 2, 2, 'u16', y * 3, codeAt + 30, traceCpu.count + y,
+    );
+    provenance.write(
+      scanlineDest + y * 64, 1, 'u8', y, codeAt + 31, traceCpu.count + y,
+    );
+  }
+  provenance.force(scanlineRegion, traceCpu.count + 64, 'probe');
+
+  const waveAt = traceMachine.alloc(256);
+  const waveDest = traceMachine.alloc(1024);
+  waveRegion = provenance.registerRange({
+    key: 'wave-destination',
+    start: waveDest,
+    length: 1024,
+    kind: 'probe',
+    capture: true,
+    width: 32,
+    height: 32,
+  });
+  for (let i = 0; i < 1024; i++) {
+    const lookup = i & 255;
+    provenance.read(waveAt + lookup, 1, 'u8', lookup, codeAt + 26, traceCpu.count + i);
+    provenance.write(waveDest + i, 1, 'u8', i, codeAt + 27, traceCpu.count + i);
+  }
+  provenance.force(waveRegion, traceCpu.count + 1024, 'probe');
+
+  const meshAt = traceMachine.alloc(4096);
+  for (let i = 0; i < 96; i++) {
+    const a = meshAt + i * 12;
+    traceMachine.mem.setFloat32(a, Math.sin(i * 0.2), true);
+    traceMachine.mem.setFloat32(a + 4, Math.cos(i * 0.13), true);
+    traceMachine.mem.setFloat32(a + 8, i * 0.05, true);
+  }
+  const indexAt = traceMachine.alloc(4096);
+  for (let i = 0; i < 288; i++) traceMachine.mem.setUint16(indexAt + i * 2, i % 96, true);
+  const meshDest = traceMachine.alloc(2048);
+  const meshRegion = provenance.registerRange({
+    key: 'mesh-framebuffer',
+    start: meshDest,
+    length: 2048,
+    kind: 'framebuffer',
+    labels: ['mesh framebuffer'],
+    capture: true,
+    width: 32,
+    height: 32,
+    layout: 'rgb565',
+  });
+  // Geometry profiling starts at the music handoff in real productions, keeping the
+  // multi-billion-instruction precalc out of the bounded mesh access profiles.
+  traceMachine.xm = {};
+  let meshCount = traceCpu.count + 10_000;
+  for (let i = 0; i < 96; i++) {
+    const at = meshAt + i * 12;
+    provenance.read(at, 4, 'f32', traceMachine.mem.getFloat32(at, true), codeAt + 1, meshCount++);
+    provenance.read(
+      at + 4, 4, 'f32', traceMachine.mem.getFloat32(at + 4, true), codeAt + 2, meshCount++,
+    );
+    provenance.read(
+      at + 8, 4, 'f32', traceMachine.mem.getFloat32(at + 8, true), codeAt + 3, meshCount++,
+    );
+    provenance.write(meshDest + i * 2, 2, 'u16', i, codeAt + 5, meshCount++);
+  }
+  for (let i = 0; i < 288; i++) {
+    provenance.read(
+      indexAt + i * 2, 2, 'u16', i % 96, codeAt + 6, meshCount++,
+    );
+    provenance.write(meshDest + (i % 1024) * 2, 2, 'u16', i, codeAt + 7, meshCount++);
+  }
+  const meshScene = provenance.scene(meshRegion, 32, 32, meshCount);
+  const mesh = meshScene?.meshes[0] ?? null;
+  const indices = mesh?.index ?? null;
+  provenance.detach();
+
+  const traceOk = traceMachine.mem.getUint32(destAt, true) === 0x78563412
+    && traceCpu.jitIns > 0
+    && traceEvents.some((event) =>
+      event.info.sources.some((source) =>
+        source.start <= sourceAt && source.end >= sourceAt && source.eip === codeAt))
+    && traceEvents.some((event) =>
+      event.info.writers.some((writer) =>
+        writer.eip === codeAt + 5 && writer.start === destAt && writer.end === destAt + 3))
+    && traceMachine.mem.getFloat32(fpuDest, true) === 1.25
+    && traceMachine.u8.subarray(stringDest, stringDest + 4).join(',') === '9,8,7,6'
+    && lutInfo?.sources.some((source) =>
+      source.type === 'possible deformation-coordinate input'
+      && source.preview?.kind === 'observed value map')
+    && lutInfo?.sources.some((source) =>
+      source.source === [...sampledRegion.labels].join('/')
+      && source.preview?.kind === 'verified source-coordinate map')
+    && scalarInfo?.sources.every((source) => source.type === 'state / parameter block')
+    && clusterInfo?.sources.filter((source) => source.eip === codeAt + 20).length === 2
+    && blendInfo?.sources.some((source) =>
+      source.type === 'possible 64K palette/blend lookup'
+      && source.preview?.kind === 'observed value map')
+    && scanlineInfo?.sources.some((source) =>
+      source.type === 'possible per-scanline lookup'
+      && source.preview?.kind === 'observed value map')
+    && waveInfo?.sources.some((source) =>
+      source.type === 'possible periodic/wave lookup'
+      && source.preview?.kind === 'observed value map')
+    && mesh !== null && mesh.vertices >= 90 && mesh.stride === 12
+    && mesh.fieldOffsets.join(',') === '0,4,8'
+    && indices !== null && indices.size === 2 && indices.triangles === 96;
+  if (!traceOk) {
+    process.stdout.write(`  trace diagnostics ${JSON.stringify({
+      copied: traceMachine.mem.getUint32(destAt, true) === 0x78563412,
+      jitIns: traceCpu.jitIns,
+      sourceEvent: traceEvents.some((event) =>
+        event.info.sources.some((source) => source.start <= sourceAt && source.end >= sourceAt)),
+      fpu: traceMachine.mem.getFloat32(fpuDest, true),
+      string: traceMachine.u8.subarray(stringDest, stringDest + 4).join(','),
+      lutTypes: lutInfo?.sources.map((source) => source.type),
+      scalarTypes: scalarInfo?.sources.map((source) => source.type),
+      clusterRanges: clusterInfo?.sources.map((source) => source.range),
+      blendTypes: blendInfo?.sources.map((source) => source.type),
+      scanlineTypes: scanlineInfo?.sources.map((source) => source.type),
+      waveTypes: waveInfo?.sources.map((source) => source.type),
+      mesh: mesh && {
+        vertices: mesh.vertices, stride: mesh.stride, fields: mesh.fieldOffsets,
+      },
+      indices,
+    })}\n`);
+  }
+  if (traceOk) ok++; else fail++;
+  process.stdout.write(
+    `Memory provenance tracing: ${traceOk ? 'match' : 'MISMATCH'}`
+    + ' (JIT/x87/string, clusters, coordinate/blend/scanline/wave maps, observed xyz/index)\n',
+  );
 
   process.stdout.write(`\n${ok} checks passed, ${fail} failed\n`);
   return fail === 0 ? 0 : 1;
@@ -761,10 +1258,228 @@ function dumpXm(ixaPath, outPath) {
   return 1;
 }
 
+function pandoraTga(raw, texture) {
+  const width = texture.width ?? 256;
+  const height = texture.height ?? 256;
+  const header = new Uint8Array(18);
+  header[2] = 2;                  // uncompressed true-colour
+  new DataView(header.buffer).setUint16(12, width, true);
+  new DataView(header.buffer).setUint16(14, height, true);
+  header[16] = 24;
+  header[17] = 0x20;             // top-left origin, as in the original Jizz dump
+  const out = new Uint8Array(header.length + width * height * 3);
+  out.set(header);
+  out.set(
+    pandoraBgr(
+      raw, texture.layout, texture.sourceX ?? 0, texture.sourceY ?? 0,
+      width, height, texture.monoPlane ?? 0,
+    ),
+    header.length,
+  );
+  return out;
+}
+
+/**
+ * Modern equivalent of Jizz's hidden `/pandora` switch.
+ *
+ * Both intros generate into a small table of 192 KiB pixel work slots. Some slots are
+ * converted in place or reused before TBL1, so polling only at the music handoff loses
+ * an earlier completed image. Sample the tables while precalculation runs and retain the
+ * first version that remains unchanged across two 2M-instruction boundaries. This is an
+ * observation only: it never changes demo memory or the instruction stream.
+ */
+function dumpPandora(ixaPath, outDir) {
+  if (!ixaPath || !outDir) {
+    process.stderr.write('usage: node run.mjs pandora <file.ixa> <outdir>\n');
+    return 2;
+  }
+
+  const bytes = new Uint8Array(readFileSync(ixaPath));
+  const digest = sha(bytes);
+  const { demoname, entries } = readIxa(bytes);
+  let profile;
+  try {
+    profile = pandoraProfile(demoname, digest);
+  } catch (error) {
+    process.stderr.write(`${error.message}\n`);
+    return 1;
+  }
+
+  const script = bytes.subarray(entries[0].pos, entries[0].pos + entries[0].size);
+  const exeOps = parseScript(script).filter((op) => op.name === 'exe');
+  if (exeOps.length !== 1) {
+    process.stderr.write(
+      `${demoname.trim()} has ${exeOps.length} executable parts; Pandora needs one\n`,
+    );
+    return 1;
+  }
+
+  process.stdout.write(
+    `${demoname.trim()}: running precalculation and observing `
+    + `${profile.textures.length} texture slots\n`,
+  );
+
+  const stop = new Error('__pandora_music_ready');
+  const machine = new Machine({
+    partmem: partmemFor(demoname),
+    clock: 'virtual',
+    onDebug: () => {},
+  });
+  const loaded = machine.loadExe(unpackBlock(bytes, entries[exeOps[0].args[0]]));
+  let hadMusic = false;
+  class PandoraJitCPU extends JitCPU {
+    farCall(off, sel) {
+      const result = super.farCall(off, sel);
+      const ready = !hadMusic && this.machine.xm !== null;
+      hadMusic = this.machine.xm !== null;
+      if (ready) throw stop;
+      return result;
+    }
+  }
+  const cpu = new PandoraJitCPU(machine);
+  cpu.retainTrampolineHits = false;
+  cpu.reset(loaded);
+
+  const states = new Map(profile.textures.map((texture) => [
+    texture.name,
+    { hash: null, dirty: false, stable: 0, raw: null, capturedAt: 0 },
+  ]));
+
+  const sample = (final = false) => {
+    for (const texture of profile.textures) {
+      const state = states.get(texture.name);
+      const capture = texture.captureAt === undefined
+        ? texture.capture ?? profile.capture ?? 'first'
+        : 'instruction';
+      const partmemOffset = texture.dumpPartmemOffset ?? texture.partmemOffset;
+      const pointer = partmemOffset === undefined
+        ? pandoraPointer(machine, loaded.base, profile, texture.slot, true)
+        : machine.partmem + partmemOffset;
+      if (pointer === 0) continue;
+      if (pointer < 0 || pointer + PANDORA_BYTES > machine.brk) {
+        throw new Error(
+          `${profile.production} texture ${texture.name} has invalid pointer `
+          + `0x${pointer.toString(16)}`,
+        );
+      }
+      const raw = machine.u8.subarray(pointer, pointer + PANDORA_BYTES);
+
+      if (capture === 'instruction') {
+        if (state.raw === null && cpu.count >= texture.captureAt) {
+          state.raw = raw.slice();
+          state.capturedAt = cpu.count;
+        }
+        continue;
+      }
+
+      const hash = sha(raw);
+
+      if (state.hash === null) {
+        state.hash = hash;
+        if (final) {
+          state.raw = raw.slice();
+          state.capturedAt = cpu.count;
+        }
+        continue;
+      }
+      if (hash !== state.hash) {
+        state.hash = hash;
+        state.dirty = true;
+        state.stable = 0;
+      } else if (state.dirty && ++state.stable >= 2 && state.raw === null
+          && capture !== 'final') {
+        state.raw = raw.slice();
+        state.capturedAt = cpu.count;
+        state.dirty = false;
+      }
+
+      if (final && (state.raw === null || capture === 'final')) {
+        state.raw = raw.slice();
+        state.capturedAt = cpu.count;
+      }
+    }
+  };
+
+  // Establish the relocated-but-not-generated baseline, then watch the decrunch in small
+  // deterministic slices. Jizz reaches TBL1 at ~2.37B instructions and Stash at ~2.58B.
+  sample();
+  const started = performance.now();
+  try {
+    while (!cpu.halted && cpu.count < 20_000_000_000) {
+      // Most observations use coarse deterministic slices. A few Jizz source images
+      // survive only in short scratch-buffer windows, so land exactly on their recovered
+      // capture counts instead of stepping over them.
+      let budget = 2_000_000;
+      for (const texture of profile.textures) {
+        const state = states.get(texture.name);
+        if (state.raw !== null || texture.captureAt === undefined
+            || texture.captureAt <= cpu.count) continue;
+        budget = Math.min(budget, texture.captureAt - cpu.count);
+      }
+      cpu.run(budget);
+      sample();
+    }
+  } catch (error) {
+    if (error !== stop) throw error;
+  }
+  sample(true);
+
+  if (!machine.xm) {
+    process.stderr.write('the intro did not reach its generated-XM handoff\n');
+    return 1;
+  }
+
+  mkdirSync(outDir, { recursive: true });
+  const manifest = {
+    format: 1,
+    production: profile.production,
+    input: { path: ixaPath, sha256: digest },
+    phase: 'first generated-XM handoff',
+    instructions: cpu.count,
+    elapsedSeconds: (performance.now() - started) / 1000,
+    textures: [],
+  };
+
+  for (const texture of profile.textures) {
+    const state = states.get(texture.name);
+    if (state.raw === null) {
+      throw new Error(
+        `${profile.production} texture slot ${texture.slot} was never populated`,
+      );
+    }
+    const filename = `${texture.name}.TGA`;
+    writeFileSync(`${outDir}/${filename}`, pandoraTga(state.raw, texture));
+    manifest.textures.push({
+      file: filename,
+      slot: texture.slot,
+      layout: texture.layout,
+      capture: texture.captureAt === undefined
+        ? texture.capture ?? profile.capture ?? 'first'
+        : 'instruction',
+      captureRequestedAtInstruction: texture.captureAt,
+      sourceX: texture.sourceX ?? 0,
+      sourceY: texture.sourceY ?? 0,
+      monoPlane: texture.monoPlane,
+      width: texture.width ?? 256,
+      height: texture.height ?? 256,
+      capturedAtInstruction: state.capturedAt,
+    });
+  }
+  writeFileSync(`${outDir}/manifest.json`, `${JSON.stringify(manifest, null, 2)}\n`);
+
+  process.stdout.write(
+    `  wrote ${profile.textures.length} 24-bit TGA files and manifest.json to `
+    + `${outDir}\n  stopped at TBL1 after ${cpu.count.toLocaleString('en-US')} instructions `
+    + `(${manifest.elapsedSeconds.toFixed(2)} s)\n`,
+  );
+  return 0;
+}
+
 const [cmd, ...rest] = process.argv.slice(2);
 if (cmd === 'verify') process.exit(verify());
 else if (cmd === 'dumpxm') process.exit(dumpXm(rest[0], rest[1]));
 else if (cmd === 'renderxm') process.exit(renderXm(rest[0], rest[1], Number(rest[2] ?? 30)));
+else if (cmd === 'pandora') process.exit(dumpPandora(rest[0], rest[1]));
 else if (cmd === 'bench') {
   import('./benchmark.mjs')
     .then(({ benchmarkIxa }) => process.exit(benchmarkIxa(rest[0], rest.slice(1))))
